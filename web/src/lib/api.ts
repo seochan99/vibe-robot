@@ -65,13 +65,6 @@ export interface ExecutionResponse {
   error?: string;
 }
 
-export interface AuthStatus {
-  authenticated: boolean;
-  plan?: string;
-  account_id?: string;
-  message?: string;
-}
-
 export async function sendCommand(
   command: string,
   scene: string,
@@ -103,22 +96,4 @@ export async function approveExecution(): Promise<ExecutionResponse> {
   return res.json();
 }
 
-export async function checkAuth(): Promise<AuthStatus> {
-  try {
-    const res = await fetch(`${API_BASE}/api/auth/status`);
-    if (!res.ok) return { authenticated: false };
-    return res.json();
-  } catch {
-    return { authenticated: false, message: "Backend not reachable" };
-  }
-}
-
-export async function triggerLogin(): Promise<AuthStatus> {
-  const res = await fetch(`${API_BASE}/api/auth/login`, { method: "POST" });
-  if (!res.ok) throw new Error(`Login failed: ${res.status}`);
-  return res.json();
-}
-
-export async function triggerLogout(): Promise<void> {
-  await fetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
-}
+// Auth is now handled client-side via chatgpt-oauth.ts (device code flow)

@@ -31,7 +31,11 @@ app = FastAPI(title="VibeRobot! API", version="0.1.0")
 # CORS for Next.js dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://viberob0t.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -142,10 +146,10 @@ def list_models():
     return {"models": models}
 
 
-# ── Auth routes ──────────────────────────────────────────────────────────────
+# ── Session routes (renamed from /auth/* to avoid ad-blocker detection) ──────
 
-@app.get("/api/auth/status")
-def auth_status():
+@app.get("/api/session/status")
+def session_status():
     """Check ChatGPT OAuth status."""
     try:
         from providers.chatgpt_auth import ChatGPTAuth
@@ -155,8 +159,8 @@ def auth_status():
         return {"authenticated": False, "message": "Auth module unavailable"}
 
 
-@app.post("/api/auth/login")
-def auth_login():
+@app.post("/api/session/connect")
+def session_connect():
     """Trigger browser OAuth login."""
     try:
         from providers.chatgpt_auth import ChatGPTAuth
@@ -171,8 +175,8 @@ def auth_login():
         return {"authenticated": False, "message": str(e)}
 
 
-@app.post("/api/auth/logout")
-def auth_logout():
+@app.post("/api/session/disconnect")
+def session_disconnect():
     """Remove stored credentials."""
     try:
         from providers.chatgpt_auth import ChatGPTAuth

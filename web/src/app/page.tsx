@@ -114,8 +114,9 @@ export default function LandingPage() {
       <section ref={heroRef} className="relative min-h-[100svh] flex items-end pb-24 sm:pb-32 overflow-hidden">
         <motion.div
           style={{ y: heroY, opacity: heroOp }}
-          className="relative max-w-[1100px] mx-auto px-6 w-full pt-32"
+          className="relative w-full pt-32 pl-[max(1.5rem,8vw)] pr-6 grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-12 items-end"
         >
+          <div>
             <motion.h1
               className="text-[clamp(2.5rem,7vw,5.5rem)] font-bold leading-[1.05] tracking-tight"
             >
@@ -174,6 +175,10 @@ export default function LandingPage() {
                 View on GitHub
               </a>
             </motion.div>
+          </div>
+
+          {/* Right column — reserved for future 3D robot */}
+          <div className="hidden lg:block" />
         </motion.div>
       </section>
 

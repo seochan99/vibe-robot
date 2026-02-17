@@ -4,18 +4,20 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AIModel,
-  AuthStatus,
   ExecutionResponse,
   PipelineResponse,
 } from "@/lib/api";
 import {
   approveExecution,
-  checkAuth,
   fetchModels,
   sendCommand,
-  triggerLogin,
-  triggerLogout,
 } from "@/lib/api";
+import type { AuthStatus } from "@/lib/chatgpt-oauth";
+import {
+  getAuthStatus,
+  startLogin,
+  clearTokens,
+} from "@/lib/chatgpt-oauth";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -141,9 +143,9 @@ export default function AppPage() {
   const recognitionRef = useRef<any>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Check auth + fetch models on mount
+  // Check auth (client-side) + fetch models on mount
   useEffect(() => {
-    checkAuth().then(setAuth);
+    setAuth(getAuthStatus());
     fetchModels().then((m) => { if (m.length > 0) setModels(m); });
   }, []);
 
@@ -233,21 +235,14 @@ export default function AppPage() {
     });
   }, [addMessage]);
 
-  // Auth
+  // Auth — client-side PKCE redirect flow
   const handleLogin = useCallback(async () => {
     setAuthLoading(true);
-    try {
-      const status = await triggerLogin();
-      setAuth(status);
-    } catch {
-      setAuth({ authenticated: false, message: "Login failed" });
-    } finally {
-      setAuthLoading(false);
-    }
+    await startLogin(); // Redirects to OpenAI — page unloads
   }, []);
 
-  const handleLogout = useCallback(async () => {
-    await triggerLogout();
+  const handleLogout = useCallback(() => {
+    clearTokens();
     setAuth({ authenticated: false });
   }, []);
 
@@ -315,7 +310,7 @@ export default function AppPage() {
               <button
                 onClick={handleLogin}
                 disabled={authLoading}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--foreground)] hover:opacity-80 text-white transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors disabled:opacity-50"
               >
                 {authLoading ? "Connecting..." : "Connect ChatGPT"}
               </button>
