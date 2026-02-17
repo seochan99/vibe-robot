@@ -1,15 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import dynamic from "next/dynamic";
+// import dynamic from "next/dynamic";
 import { motion, useScroll, useTransform } from "framer-motion";
 import { useRef } from "react";
 import SignupForm from "@/components/SignupForm";
 
-const RobotArm3D = dynamic(() => import("@/components/RobotArm3D"), {
-  ssr: false,
-  loading: () => <div className="w-full h-full" />,
-});
+// const RobotArm3D = dynamic(() => import("@/components/RobotArm3D"), {
+//   ssr: false,
+//   loading: () => <div className="w-full h-full" />,
+// });
 
 /* ── Data ───────────────────────────────────────────────────────────────────── */
 
@@ -111,30 +111,40 @@ export default function LandingPage() {
       </nav>
 
       {/* ── Hero ────────────────────────────────────────────────────────────── */}
-      <section ref={heroRef} className="relative min-h-[100svh] overflow-hidden">
-        <div className="max-w-[1100px] mx-auto px-6 min-h-[100svh] grid grid-cols-1 lg:grid-cols-2 gap-8 items-end lg:items-center pt-20 pb-24 sm:pb-32 lg:pb-0">
-          {/* Left — text */}
-          <motion.div style={{ y: heroY, opacity: heroOp }} className="relative z-10">
-            <motion.p
-              initial="hidden" animate="visible" variants={reveal} custom={0}
-              className="font-mono text-xs tracking-wider text-[var(--muted)] mb-6 uppercase"
-            >
-              Research Project
-            </motion.p>
-
+      <section ref={heroRef} className="relative min-h-[100svh] flex items-end pb-24 sm:pb-32 overflow-hidden">
+        <motion.div
+          style={{ y: heroY, opacity: heroOp }}
+          className="relative max-w-[1100px] mx-auto px-6 w-full pt-32"
+        >
             <motion.h1
-              initial="hidden" animate="visible" variants={reveal} custom={1}
               className="text-[clamp(2.5rem,7vw,5.5rem)] font-bold leading-[1.05] tracking-tight"
             >
-              Talk to a robot arm.
-              <br />
-              <span className="text-[var(--muted)]">
-                It verifies before it moves.
+              <span className="block overflow-hidden">
+                <motion.span
+                  className="block"
+                  initial={{ y: "100%" }}
+                  animate={{ y: 0 }}
+                  transition={{ duration: 0.8, delay: 0.2, ease: "easeOut" as const }}
+                >
+                  Talk to a robot arm.
+                </motion.span>
+              </span>
+              <span className="block overflow-hidden">
+                <motion.span
+                  className="block text-[var(--muted)]"
+                  initial={{ y: "100%" }}
+                  animate={{ y: 0 }}
+                  transition={{ duration: 0.8, delay: 0.5, ease: "easeOut" as const }}
+                >
+                  It verifies before it moves.
+                </motion.span>
               </span>
             </motion.h1>
 
             <motion.p
-              initial="hidden" animate="visible" variants={reveal} custom={3}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 1, ease: "easeOut" as const }}
               className="mt-8 text-lg sm:text-xl text-[var(--muted)] max-w-xl leading-relaxed"
             >
               VibeRobot! lets you command a robot with natural language.
@@ -143,7 +153,9 @@ export default function LandingPage() {
             </motion.p>
 
             <motion.div
-              initial="hidden" animate="visible" variants={reveal} custom={5}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 1.3, ease: "easeOut" as const }}
               className="mt-10 flex flex-wrap gap-3"
             >
               <Link
@@ -162,18 +174,7 @@ export default function LandingPage() {
                 View on GitHub
               </a>
             </motion.div>
-          </motion.div>
-
-          {/* Right — 3D robot arm */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 1.2, delay: 0.5 }}
-            className="relative h-[400px] sm:h-[500px] lg:h-[600px] -mr-6 lg:mr-0"
-          >
-            <RobotArm3D />
-          </motion.div>
-        </div>
+        </motion.div>
       </section>
 
       {/* ── The tension ─────────────────────────────────────────────────────── */}
