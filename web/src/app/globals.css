@@ -1,0 +1,96 @@
+@import "tailwindcss";
+
+:root {
+  --background: #faf9f7;
+  --foreground: #1a1a1a;
+  --muted: #6b6b6b;
+  --surface: #f0eeeb;
+  --border: #e0ddd8;
+  --accent: #c8441e;
+  --accent-soft: #c8441e18;
+  --code-bg: #1a1a1a;
+  --code-fg: #e8e4df;
+  --tag: #2d6a4f;
+  --tag-soft: #2d6a4f14;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #111110;
+    --foreground: #e8e4df;
+    --muted: #8a8a8a;
+    --surface: #1c1c1a;
+    --border: #2a2a28;
+    --accent: #e05a33;
+    --accent-soft: #e05a3320;
+    --code-bg: #0a0a09;
+    --code-fg: #c8c4bf;
+    --tag: #52b788;
+    --tag-soft: #52b78820;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-body, "DM Sans", system-ui, sans-serif);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Noise overlay for texture */
+.noise::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* Chat message animation (used in /app) */
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.message-enter { animation: message-in 0.3s ease-out forwards; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+
+/* Step connector line */
+.step-line {
+  position: relative;
+}
+.step-line::after {
+  content: "";
+  position: absolute;
+  left: 23px;
+  top: 52px;
+  bottom: -72px;
+  width: 1px;
+  background: var(--border);
+}
+.step-line:last-child::after {
+  display: none;
+}
