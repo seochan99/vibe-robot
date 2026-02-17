@@ -13,6 +13,11 @@ build/
 venv/
 env/
 
+# Node
+node_modules/
+.next/
+web/.next/
+
 # MuJoCo Menagerie (downloaded at setup)
 assets/mujoco_menagerie/
 
