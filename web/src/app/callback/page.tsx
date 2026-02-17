@@ -2,7 +2,7 @@
 
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { handleCallback } from "@/lib/chatgpt-oauth";
+import { parseCallbackUrl, exchangeCode } from "@/lib/chatgpt-oauth";
 
 function CallbackContent() {
   const searchParams = useSearchParams();
@@ -13,7 +13,14 @@ function CallbackContent() {
   useEffect(() => {
     async function process() {
       try {
-        await handleCallback(searchParams);
+        const code = searchParams.get("code");
+        if (!code) {
+          // No code — show instructions to copy URL
+          setStatus("error");
+          setError("Copy this page's full URL and paste it in the VibeRobot app.");
+          return;
+        }
+        await exchangeCode(code);
         setStatus("success");
         setTimeout(() => router.push("/app"), 1200);
       } catch (e) {
@@ -44,7 +51,7 @@ function CallbackContent() {
         )}
         {status === "error" && (
           <>
-            <p className="text-[var(--accent)] font-medium">Connection failed</p>
+            <p className="text-[var(--accent)] font-medium">Connection issue</p>
             <p className="mt-2 text-sm text-[var(--muted)]">{error}</p>
             <button
               onClick={() => router.push("/app")}

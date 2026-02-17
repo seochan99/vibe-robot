@@ -1,14 +1,20 @@
 /**
- * ChatGPT OAuth 2.0 PKCE — browser redirect flow.
+ * ChatGPT OAuth 2.0 PKCE — browser flow.
  *
- * Uses the same OAuth client as the official OpenAI Codex CLI.
- * PKCE flow: redirect to OpenAI → user logs in → redirect back with code → exchange for tokens.
+ * Uses the same OAuth client + endpoints as the official OpenAI Codex CLI.
+ * Since the only registered redirect_uri is localhost:1455, the web app
+ * opens a new tab for login, then the user pastes the redirect URL back.
+ *
+ * Sources:
+ *  - https://github.com/numman-ali/opencode-openai-codex-auth
+ *  - https://developers.openai.com/codex/auth/
  */
 
-const AUTH_URL = "https://auth.openai.com/authorize";
+const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const SCOPES = "openid profile email offline_access";
+const REDIRECT_URI = "http://localhost:1455/auth/callback";
+const SCOPE = "openid profile email offline_access";
 
 const STORAGE_KEY = "viberobot_oauth";
 const PKCE_KEY = "viberobot_pkce";
@@ -30,20 +36,13 @@ export interface AuthStatus {
   message?: string;
 }
 
-// ── Redirect URI ─────────────────────────────────────────────────────────────
-
-function getRedirectUri(): string {
-  if (typeof window === "undefined") return "http://localhost:3000/callback";
-  return `${window.location.origin}/callback`;
+export interface PKCEFlow {
+  authUrl: string;
+  verifier: string;
+  state: string;
 }
 
 // ── PKCE helpers ─────────────────────────────────────────────────────────────
-
-function randomBytes(n: number): Uint8Array {
-  const buf = new Uint8Array(n);
-  crypto.getRandomValues(buf);
-  return buf;
-}
 
 function base64url(buf: ArrayBuffer | Uint8Array): string {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
@@ -53,7 +52,9 @@ function base64url(buf: ArrayBuffer | Uint8Array): string {
 }
 
 async function generatePKCE() {
-  const verifier = base64url(randomBytes(32));
+  const raw = new Uint8Array(32);
+  crypto.getRandomValues(raw);
+  const verifier = base64url(raw);
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(verifier)
@@ -62,7 +63,7 @@ async function generatePKCE() {
   return { verifier, challenge };
 }
 
-// ── JWT decode (no verification — we trust auth.openai.com) ──────────────────
+// ── JWT decode ───────────────────────────────────────────────────────────────
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
   try {
@@ -113,69 +114,82 @@ export function getAuthStatus(): AuthStatus {
   };
 }
 
-// ── Step 1: Redirect to OpenAI login ─────────────────────────────────────────
+// ── Step 1: Generate auth URL ────────────────────────────────────────────────
 
-export async function startLogin() {
+export async function createAuthFlow(): Promise<PKCEFlow> {
   const { verifier, challenge } = await generatePKCE();
-  const state = base64url(randomBytes(16));
-  const redirectUri = getRedirectUri();
-
-  // Persist PKCE verifier + state + redirect_uri for after redirect
-  localStorage.setItem(
-    PKCE_KEY,
-    JSON.stringify({ verifier, state, redirect_uri: redirectUri })
-  );
+  const stateBytes = new Uint8Array(16);
+  crypto.getRandomValues(stateBytes);
+  const state = base64url(stateBytes);
 
   const params = new URLSearchParams({
     response_type: "code",
     client_id: CLIENT_ID,
-    redirect_uri: redirectUri,
-    scope: SCOPES,
+    redirect_uri: REDIRECT_URI,
+    scope: SCOPE,
     code_challenge: challenge,
     code_challenge_method: "S256",
     state,
-    audience: "https://api.openai.com/v1",
+    id_token_add_organizations: "true",
+    codex_cli_simplified_flow: "true",
+    originator: "codex_cli_rs",
   });
 
-  window.location.href = `${AUTH_URL}?${params}`;
+  const authUrl = `${AUTHORIZE_URL}?${params}`;
+
+  // Persist for after redirect/paste
+  localStorage.setItem(PKCE_KEY, JSON.stringify({ verifier, state }));
+
+  return { authUrl, verifier, state };
 }
 
-// ── Step 2: Handle callback (called from /callback page) ─────────────────────
+// ── Step 2: Parse callback URL + exchange code ───────────────────────────────
 
-export async function handleCallback(
-  searchParams: URLSearchParams
-): Promise<OAuthTokens> {
-  const code = searchParams.get("code");
-  const returnedState = searchParams.get("state");
-  const error = searchParams.get("error");
-  const errorDesc = searchParams.get("error_description");
+export function parseCallbackUrl(
+  input: string
+): { code: string; state: string } | null {
+  const trimmed = (input || "").trim();
+  if (!trimmed) return null;
 
-  if (error) {
-    throw new Error(errorDesc || error);
+  try {
+    const url = new URL(trimmed);
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    if (code) return { code, state: state || "" };
+  } catch {
+    // Not a URL — try other formats
   }
-  if (!code) {
-    throw new Error("No authorization code received");
+
+  // code#state format
+  if (trimmed.includes("#")) {
+    const [code, state] = trimmed.split("#", 2);
+    return { code, state: state || "" };
   }
 
-  // Verify state + retrieve PKCE verifier
+  // query string format
+  if (trimmed.includes("code=")) {
+    const params = new URLSearchParams(trimmed);
+    const code = params.get("code");
+    if (code) return { code, state: params.get("state") || "" };
+  }
+
+  return null;
+}
+
+export async function exchangeCode(code: string): Promise<OAuthTokens> {
   const pkceRaw = localStorage.getItem(PKCE_KEY);
-  if (!pkceRaw) throw new Error("PKCE state not found — please try logging in again");
-  const { verifier, state, redirect_uri } = JSON.parse(pkceRaw);
+  if (!pkceRaw) throw new Error("Auth session expired. Please try again.");
+  const { verifier, state: savedState } = JSON.parse(pkceRaw);
 
-  if (returnedState !== state) {
-    throw new Error("State mismatch — possible CSRF attack");
-  }
-
-  // Exchange code for tokens
   const resp = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "authorization_code",
-      code,
-      redirect_uri: redirect_uri,
       client_id: CLIENT_ID,
+      code,
       code_verifier: verifier,
+      redirect_uri: REDIRECT_URI,
     }),
   });
 
@@ -185,21 +199,20 @@ export async function handleCallback(
   }
 
   const data = await resp.json();
-  const accessToken: string = data.access_token;
-  const refreshToken: string = data.refresh_token || "";
-  const expiresIn: number = data.expires_in || 86400;
+  if (!data.access_token || !data.refresh_token) {
+    throw new Error("Invalid token response");
+  }
 
-  // Extract account info from JWT
-  const claims = decodeJwtPayload(accessToken);
+  const claims = decodeJwtPayload(data.access_token);
   const authInfo = (claims["https://api.openai.com/auth"] || {}) as Record<
     string,
     string
   >;
 
   const tokens: OAuthTokens = {
-    access_token: accessToken,
-    refresh_token: refreshToken,
-    expires_at: Date.now() + expiresIn * 1000,
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    expires_at: Date.now() + (data.expires_in || 86400) * 1000,
     account_id: authInfo.chatgpt_account_id || "",
     plan_type: authInfo.chatgpt_plan_type || "",
   };
