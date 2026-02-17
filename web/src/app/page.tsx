@@ -1,15 +1,9 @@
 "use client";
 
 import Link from "next/link";
-// import dynamic from "next/dynamic";
 import { motion, useScroll, useTransform } from "framer-motion";
 import { useRef } from "react";
 import SignupForm from "@/components/SignupForm";
-
-// const RobotArm3D = dynamic(() => import("@/components/RobotArm3D"), {
-//   ssr: false,
-//   loading: () => <div className="w-full h-full" />,
-// });
 
 /* ── Data ───────────────────────────────────────────────────────────────────── */
 
@@ -177,7 +171,6 @@ export default function LandingPage() {
             </motion.div>
           </div>
 
-          {/* Right column — reserved for future 3D robot */}
           <div className="hidden lg:block" />
         </motion.div>
       </section>

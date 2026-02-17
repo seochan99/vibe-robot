@@ -153,6 +153,15 @@ export default function AppPage() {
     fetchModels().then((m) => { if (m.length > 0) setModels(m); });
   }, []);
 
+  // Close dropdowns on outside click
+  useEffect(() => {
+    const handler = () => { setSceneOpen(false); setModelOpen(false); };
+    if (sceneOpen || modelOpen) {
+      document.addEventListener("click", handler, { once: true });
+      return () => document.removeEventListener("click", handler);
+    }
+  }, [sceneOpen, modelOpen]);
+
   // Auto-scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -207,7 +216,7 @@ export default function AppPage() {
     } finally {
       setLoading(false);
     }
-  }, [input, loading, scene, addMessage]);
+  }, [input, loading, scene, model, addMessage]);
 
   // Approve
   const handleApprove = useCallback(async () => {
@@ -373,44 +382,45 @@ export default function AppPage() {
               </button>
             </div>
 
-            <div className="space-y-4 text-sm">
+            <div className="space-y-5 text-sm">
               <div className="flex gap-3">
                 <span className="shrink-0 w-6 h-6 rounded-full bg-[#10a37f] text-white flex items-center justify-center text-xs font-bold">1</span>
                 <div>
                   <p>Sign in with your ChatGPT account in the new tab.</p>
-                  <button
-                    onClick={() => window.open(authModal.authUrl, "_blank")}
-                    className="mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors"
+                  <a
+                    href={authModal.authUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors"
                   >
-                    Open Login Page
-                  </button>
+                    Open Login Page &rarr;
+                  </a>
                 </div>
               </div>
 
               <div className="flex gap-3">
                 <span className="shrink-0 w-6 h-6 rounded-full bg-[var(--foreground)] text-[var(--background)] flex items-center justify-center text-xs font-bold">2</span>
                 <div className="flex-1">
-                  <p>After logging in, you&apos;ll see an error page. <strong>Copy the full URL</strong> from the address bar and paste it here:</p>
-                  <input
-                    type="text"
-                    value={callbackUrl}
-                    onChange={(e) => setCallbackUrl(e.target.value)}
-                    placeholder="http://localhost:1455/auth/callback?code=..."
-                    className="mt-2 w-full px-3 py-2 text-xs font-mono rounded-md border border-[var(--border)] bg-[var(--surface)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[#10a37f]/50"
-                  />
-                </div>
-              </div>
-
-              <div className="flex gap-3">
-                <span className="shrink-0 w-6 h-6 rounded-full bg-[var(--foreground)] text-[var(--background)] flex items-center justify-center text-xs font-bold">3</span>
-                <div>
-                  <button
-                    onClick={handleLoginComplete}
-                    disabled={!callbackUrl.trim() || authLoading}
-                    className="px-4 py-2 text-xs font-medium rounded-md bg-[var(--foreground)] text-[var(--background)] hover:opacity-80 transition-opacity disabled:opacity-40"
-                  >
-                    {authLoading ? "Connecting..." : "Connect"}
-                  </button>
+                  <p className="mb-2">After logging in, you&apos;ll see an error page. <strong>Copy the full URL</strong> from the address bar and paste it below.</p>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={callbackUrl}
+                      onChange={(e) => setCallbackUrl(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && callbackUrl.trim()) handleLoginComplete(); }}
+                      // eslint-disable-next-line jsx-a11y/no-autofocus
+                      autoFocus
+                      placeholder="Paste URL here..."
+                      className="flex-1 px-3 py-2 text-xs font-mono rounded-md border border-[var(--border)] bg-[var(--surface)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[#10a37f]/50"
+                    />
+                    <button
+                      onClick={handleLoginComplete}
+                      disabled={!callbackUrl.trim() || authLoading}
+                      className="px-4 py-2 text-xs font-medium rounded-md bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors disabled:opacity-40 shrink-0"
+                    >
+                      {authLoading ? "..." : "Connect"}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { parseCallbackUrl, exchangeCode } from "@/lib/chatgpt-oauth";
+import { exchangeCode } from "@/lib/chatgpt-oauth";
 
 function CallbackContent() {
   const searchParams = useSearchParams();
