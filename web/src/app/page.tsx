@@ -1,8 +1,14 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { motion, useScroll, useTransform } from "framer-motion";
 import { useRef } from "react";
+
+const RobotArm3D = dynamic(() => import("@/components/RobotArm3D"), {
+  ssr: false,
+  loading: () => <div className="w-full h-full" />,
+});
 
 /* ── Data ───────────────────────────────────────────────────────────────────── */
 
@@ -104,70 +110,68 @@ export default function LandingPage() {
       </nav>
 
       {/* ── Hero ────────────────────────────────────────────────────────────── */}
-      <section ref={heroRef} className="relative min-h-[100svh] flex items-end pb-24 sm:pb-32 overflow-hidden">
-        <motion.div
-          style={{ y: heroY, opacity: heroOp }}
-          className="relative max-w-[1100px] mx-auto px-6 w-full pt-32"
-        >
-          <motion.p
-            initial="hidden" animate="visible" variants={reveal} custom={0}
-            className="font-mono text-xs tracking-wider text-[var(--muted)] mb-6 uppercase"
-          >
-            Research Project
-          </motion.p>
-
-          <motion.h1
-            initial="hidden" animate="visible" variants={reveal} custom={1}
-            className="text-[clamp(2.5rem,7vw,5.5rem)] font-bold leading-[1.05] tracking-tight max-w-3xl"
-          >
-            Talk to a robot arm.
-            <br />
-            <span className="text-[var(--muted)]">
-              It verifies before it moves.
-            </span>
-          </motion.h1>
-
-          <motion.p
-            initial="hidden" animate="visible" variants={reveal} custom={3}
-            className="mt-8 text-lg sm:text-xl text-[var(--muted)] max-w-xl leading-relaxed"
-          >
-            VibeRobot! lets you command a robot with natural language.
-            The system infers your intent, discovers object affordances,
-            and runs a full simulation — all before anything physical happens.
-          </motion.p>
-
-          <motion.div
-            initial="hidden" animate="visible" variants={reveal} custom={5}
-            className="mt-10 flex flex-wrap gap-3"
-          >
-            <Link
-              href="/app"
-              className="group inline-flex items-center gap-2 px-5 py-3 bg-[var(--foreground)] text-[var(--background)] text-sm font-medium rounded-md hover:opacity-80 transition-opacity"
+      <section ref={heroRef} className="relative min-h-[100svh] overflow-hidden">
+        <div className="max-w-[1100px] mx-auto px-6 min-h-[100svh] grid grid-cols-1 lg:grid-cols-2 gap-8 items-end lg:items-center pt-20 pb-24 sm:pb-32 lg:pb-0">
+          {/* Left — text */}
+          <motion.div style={{ y: heroY, opacity: heroOp }} className="relative z-10">
+            <motion.p
+              initial="hidden" animate="visible" variants={reveal} custom={0}
+              className="font-mono text-xs tracking-wider text-[var(--muted)] mb-6 uppercase"
             >
-              Try the demo
-              <span className="inline-block group-hover:translate-x-0.5 transition-transform">&rarr;</span>
-            </Link>
-            <a
-              href="https://github.com/seochan99/vibe-robot"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-5 py-3 text-sm font-medium border border-[var(--border)] rounded-md hover:bg-[var(--surface)] transition-colors"
+              Research Project
+            </motion.p>
+
+            <motion.h1
+              initial="hidden" animate="visible" variants={reveal} custom={1}
+              className="text-[clamp(2.5rem,7vw,5.5rem)] font-bold leading-[1.05] tracking-tight"
             >
-              View on GitHub
-            </a>
+              Talk to a robot arm.
+              <br />
+              <span className="text-[var(--muted)]">
+                It verifies before it moves.
+              </span>
+            </motion.h1>
+
+            <motion.p
+              initial="hidden" animate="visible" variants={reveal} custom={3}
+              className="mt-8 text-lg sm:text-xl text-[var(--muted)] max-w-xl leading-relaxed"
+            >
+              VibeRobot! lets you command a robot with natural language.
+              The system infers your intent, discovers object affordances,
+              and runs a full simulation — all before anything physical happens.
+            </motion.p>
+
+            <motion.div
+              initial="hidden" animate="visible" variants={reveal} custom={5}
+              className="mt-10 flex flex-wrap gap-3"
+            >
+              <Link
+                href="/app"
+                className="group inline-flex items-center gap-2 px-5 py-3 bg-[var(--foreground)] text-[var(--background)] text-sm font-medium rounded-md hover:opacity-80 transition-opacity"
+              >
+                Try the demo
+                <span className="inline-block group-hover:translate-x-0.5 transition-transform">&rarr;</span>
+              </Link>
+              <a
+                href="https://github.com/seochan99/vibe-robot"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-5 py-3 text-sm font-medium border border-[var(--border)] rounded-md hover:bg-[var(--surface)] transition-colors"
+              >
+                View on GitHub
+              </a>
+            </motion.div>
           </motion.div>
-        </motion.div>
 
-        {/* Decorative element — abstract robot arm silhouette via simple lines */}
-        <div className="absolute top-32 right-8 sm:right-16 w-40 sm:w-64 opacity-[0.06] select-none pointer-events-none" aria-hidden>
-          <svg viewBox="0 0 200 400" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M100 380 L100 260 L60 180 L80 100 L130 60 L150 20" />
-            <circle cx="150" cy="20" r="8" />
-            <circle cx="100" cy="260" r="6" />
-            <circle cx="60" cy="180" r="5" />
-            <circle cx="80" cy="100" r="5" />
-            <circle cx="130" cy="60" r="5" />
-          </svg>
+          {/* Right — 3D robot arm */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 1.2, delay: 0.5 }}
+            className="relative h-[400px] sm:h-[500px] lg:h-[600px] -mr-6 lg:mr-0"
+          >
+            <RobotArm3D />
+          </motion.div>
         </div>
       </section>
 
