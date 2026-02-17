@@ -1,16 +1,14 @@
-"""Gradio UI for VibeRobot — 5-screen Vibe-to-Verify workflow.
+"""Gradio UI for VibeRobot — chat-style Vibe-to-Verify interface.
 
-Screen 1: Command Input — natural language command entry
-Screen 2: Intent Confirmation — "Is this what you meant?"
-Screen 3: Safety Contract Display — safety conditions overview
-Screen 4: Simulation Preview — video preview + approve/reject
-Screen 5: Result / Failure Card — success or failure explanation + patches
+A conversational interface where users send natural language commands and
+the system responds with pipeline stages (intent, affordance, plan, safety)
+as chat messages. Requires ChatGPT OAuth login to use.
 """
 
 from __future__ import annotations
 
 import json
-import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -30,325 +28,487 @@ from study.logger import InteractionLogger
 from ui.failure_cards import FailureCardGenerator
 
 
-class VibeRobotUI:
-    """Main Gradio application for VibeRobot."""
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+def _check_auth() -> dict:
+    """Check if ChatGPT OAuth is active. Returns status dict."""
+    try:
+        from providers.chatgpt_auth import ChatGPTAuth
+        auth = ChatGPTAuth()
+        return auth.status
+    except Exception:
+        return {"authenticated": False, "message": "Auth module unavailable"}
+
+
+def _do_login() -> str:
+    """Trigger browser OAuth login flow. Returns status message."""
+    try:
+        from providers.chatgpt_auth import ChatGPTAuth
+        auth = ChatGPTAuth()
+        tokens = auth.login(headless=False)
+        plan = tokens.plan_type or "unknown"
+        return f"authenticated|{plan}"
+    except Exception as e:
+        return f"error|{e}"
+
+
+def _do_device_login() -> str:
+    """Trigger device code login flow. Returns status message."""
+    try:
+        from providers.chatgpt_auth import ChatGPTAuth
+        auth = ChatGPTAuth()
+        tokens = auth.login(headless=True)
+        plan = tokens.plan_type or "unknown"
+        return f"authenticated|{plan}"
+    except Exception as e:
+        return f"error|{e}"
+
+
+def _do_logout() -> str:
+    try:
+        from providers.chatgpt_auth import ChatGPTAuth
+        ChatGPTAuth().logout()
+        return "logged_out"
+    except Exception as e:
+        return f"error|{e}"
+
+
+# ── Pipeline state ────────────────────────────────────────────────────────────
+
+class AppState:
+    """Shared application state."""
 
     def __init__(self):
-        self._pipeline: Optional[VibeRobotPipeline] = None
-        self._current_result: Optional[PipelineResult] = None
-        self._logger = InteractionLogger()
-        self._failure_gen = FailureCardGenerator()
-        self._scene_name = "wind_paper"
+        self.pipeline: Optional[VibeRobotPipeline] = None
+        self.current_result: Optional[PipelineResult] = None
+        self.scene_name = "wind_paper"
+        self.logger = InteractionLogger()
+        self.failure_gen = FailureCardGenerator()
 
-    def _init_pipeline(self, scene_name: str) -> str:
-        """Initialize or reinitialize the pipeline with a scene."""
-        self._scene_name = scene_name
+    def init_pipeline(self, scene_name: str):
+        self.scene_name = scene_name
         objects = TASK_PRESETS.get(scene_name, TASK_PRESETS["wind_paper"])
-
-        conditions = ["wind_present"] if scene_name == "wind_paper" else []
         xml = build_scene_xml(objects, include_wind="wind" in scene_name)
-
         env = MuJoCoEnv(xml_string=xml)
         controller = FrankaController(env)
         env.reset()
+        self.pipeline = VibeRobotPipeline(env, controller, scene_objects=objects)
 
-        self._pipeline = VibeRobotPipeline(env, controller, scene_objects=objects)
-        return f"Scene '{scene_name}' loaded with {len(objects)} objects."
+    def run_command(self, command: str, scene_name: str) -> PipelineResult:
+        if self.pipeline is None or self.scene_name != scene_name:
+            self.init_pipeline(scene_name)
+        self.logger.log_command(command)
+        conditions = ["wind_present"] if "wind" in scene_name else []
+        result = self.pipeline.run_sync(command, conditions=conditions, auto_approve=False)
+        self.current_result = result
+        return result
 
-    def _process_command(self, command: str, scene_name: str) -> tuple:
-        """Process a user command through the pipeline (up to approval)."""
-        if self._pipeline is None or self._scene_name != scene_name:
-            self._init_pipeline(scene_name)
+    def approve(self) -> PipelineResult:
+        if self.current_result is None or self.pipeline is None:
+            return None
+        self.logger.log_approval(approved=True)
+        result = self.pipeline.approve_and_execute(self.current_result)
+        self.current_result = result
+        return result
 
-        self._logger.log_command(command)
+    def reject(self):
+        self.current_result = None
 
-        conditions = []
-        if "wind" in scene_name:
-            conditions.append("wind_present")
 
-        result = self._pipeline.run_sync(command, conditions=conditions, auto_approve=False)
-        self._current_result = result
+_state = AppState()
 
-        # Extract display data
-        intent_display = ""
-        affordance_display = ""
-        plan_display = ""
-        safety_display = ""
-        preview_image = None
-        status = ""
 
-        if result.intent:
-            intent_display = _format_intent_display(result.intent)
+# ── Chat response builder ────────────────────────────────────────────────────
 
-        if result.affordance:
-            affordance_display = _format_affordance_display(result.affordance)
+def _build_chat_response(result: PipelineResult) -> str:
+    """Build a single markdown chat message from pipeline result."""
+    parts = []
 
-        if result.plan:
-            plan_display = _format_plan_display(result.plan)
+    # Intent
+    if result.intent:
+        i = result.intent
+        parts.append(
+            "### Intent Analysis\n"
+            f"**You said:** {i.raw_command}\n\n"
+            f"**You meant:** {i.intended_meaning}\n\n"
+            f"**Goal:** {i.immediate_goal}\n\n"
+            f"**Targets:** {', '.join(i.target_objects)}\n\n"
+            f"**Constraints:** {', '.join(i.implicit_constraints)}\n\n"
+            f"*Confidence: {i.confidence:.0%}*"
+        )
 
-        if result.safety_contract:
-            safety_display = _format_safety_display(result.safety_contract)
+    # Affordance
+    if result.affordance:
+        a = result.affordance
+        lines = []
+        if a.recommended_object:
+            lines.append(
+                f"Use **{a.recommended_object}** — "
+                f"activating its *{a.recommended_affordance}* affordance"
+            )
+        for oa in a.objects:
+            active = [f"`{af.name}` ({af.score:.0%})" for af in oa.active_affordances[:3]]
+            if active:
+                lines.append(f"- **{oa.object_name}** ({oa.object_category}): {', '.join(active)}")
+        if a.reasoning:
+            lines.append(f"\n> {a.reasoning}")
+        parts.append("### Affordance Discovery\n" + "\n".join(lines))
 
-        if result.preview_frames:
-            preview_image = result.preview_frames[-1]  # Last frame
+    # Plan
+    if result.plan:
+        p = result.plan
+        steps_md = []
+        for idx, step in enumerate(p.steps, 1):
+            params = ""
+            if step.params:
+                params = f"  `{step.params}`"
+            desc = f"  *{step.description}*" if step.description else ""
+            steps_md.append(f"{idx}. `{step.action}({step.target})`{params}\n{desc}")
+        parts.append(
+            f"### Execution Plan\n"
+            f"**{p.plan_description}**\n\n"
+            + "\n".join(steps_md)
+            + f"\n\n*Est. {p.estimated_duration:.0f}s | Risk: {p.risk_level}*"
+        )
 
-        if result.error:
-            status = f"Error: {result.error}"
-        elif result.stage == PipelineStage.AWAITING_APPROVAL:
-            status = "Plan ready for your review. Approve to execute."
-        else:
-            status = f"Stage: {result.stage.value}"
+    # Safety
+    if result.safety_contract:
+        d = result.safety_contract.to_display_dict()
+        lines = []
+        for c in d["preconditions"]:
+            lines.append(f"- [{c['severity'].upper()}] {c['description']}")
+        for c in d["invariants"]:
+            lines.append(f"- [{c['severity'].upper()}] {c['description']}")
+        for c in d["tripwires"]:
+            lines.append(f"- [TRIPWIRE] {c['description']}")
+        lim = d["limits"]
+        lines.append(f"\nMax speed: {lim['max_velocity_m_s']} m/s | Max torque: {lim['max_torque_Nm']} Nm")
+        parts.append("### Safety Contract\n" + "\n".join(lines))
 
+    # Error
+    if result.error:
+        parts.append(f"### Error\n{result.error}")
+
+    # Status
+    if result.stage == PipelineStage.AWAITING_APPROVAL:
+        parts.append(
+            "---\n"
+            "Plan is ready. Click **Approve** to execute in simulation, "
+            "or **Reject** to cancel."
+        )
+
+    return "\n\n".join(parts)
+
+
+def _build_exec_response(result: PipelineResult) -> str:
+    """Build chat message from execution result."""
+    if result is None:
+        return "No plan to execute."
+
+    if result.success:
+        lines = ["### Execution Complete\n"]
+        for r in result.execution_results:
+            icon = "+" if r.get("success") else "x"
+            lines.append(f"- [{icon}] `{r.get('action', '')}({r.get('target', '')})` — {r.get('message', '')}")
+        return "\n".join(lines)
+    else:
+        card = _state.failure_gen.generate("plan_empty", {"error": result.error})
+        lines = [
+            f"### {card.title}\n",
+            f"**What happened:** {card.what_happened}\n",
+            f"**Why:** {card.why}\n",
+            "**Suggested fixes:**",
+        ]
+        for fix in card.suggested_fixes:
+            lines.append(f"- {fix}")
+        return "\n".join(lines)
+
+
+# ── Gradio event handlers ────────────────────────────────────────────────────
+
+def on_check_auth():
+    """Check auth and return visibility states."""
+    status = _check_auth()
+    if status.get("authenticated"):
+        plan = status.get("plan", "unknown")
+        acc = status.get("account_id", "")
+        label = f"Logged in — ChatGPT {plan.title()}"
+        if acc:
+            label += f" ({acc})"
         return (
-            intent_display,
-            affordance_display,
-            plan_display,
-            safety_display,
-            preview_image,
-            status,
+            gr.update(visible=False),   # login_section hidden
+            gr.update(visible=True),    # main_section visible
+            gr.update(value=label),     # auth_status label
+            gr.update(visible=True),    # logout_btn visible
         )
+    return (
+        gr.update(visible=True),    # login_section visible
+        gr.update(visible=False),   # main_section hidden
+        gr.update(value=""),        # auth_status
+        gr.update(visible=False),   # logout_btn
+    )
 
-    def _approve_execution(self) -> tuple:
-        """Approve and execute the current plan."""
-        if self._current_result is None or self._pipeline is None:
-            return "No plan to execute.", None, ""
 
-        self._logger.log_approval(approved=True)
-        result = self._pipeline.approve_and_execute(self._current_result)
-        self._current_result = result
+def on_login():
+    result = _do_login()
+    if result.startswith("authenticated"):
+        plan = result.split("|")[1]
+        return (
+            gr.update(visible=False),
+            gr.update(visible=True),
+            gr.update(value=f"Logged in — ChatGPT {plan.title()}"),
+            gr.update(visible=True),
+            "",
+        )
+    error = result.split("|", 1)[1] if "|" in result else result
+    return (
+        gr.update(visible=True),
+        gr.update(visible=False),
+        gr.update(value=""),
+        gr.update(visible=False),
+        f"Login failed: {error}",
+    )
 
-        if result.success:
-            exec_summary = _format_execution_results(result.execution_results)
-            self._logger.log_execution_result(result.execution_results)
-            return "Execution completed successfully!", None, exec_summary
-        else:
-            card = self._failure_gen.generate("plan_empty", {"error": result.error})
-            failure_display = _format_failure_card(card)
-            self._logger.log_failure({"error": result.error})
-            return f"Execution failed: {result.error}", None, failure_display
 
-    def _reject_execution(self, reason: str) -> str:
-        """Reject the current plan."""
-        self._logger.log_approval(approved=False, reason=reason)
-        self._current_result = None
-        return "Plan rejected. Enter a new command or modify your request."
+def on_logout():
+    _do_logout()
+    return (
+        gr.update(visible=True),
+        gr.update(visible=False),
+        gr.update(value=""),
+        gr.update(visible=False),
+    )
 
-    def build(self) -> gr.Blocks:
-        """Build the Gradio interface."""
-        cfg = get_config()
 
-        with gr.Blocks(
-            title="VibeRobot — Vibe-to-Verify",
-            theme=gr.themes.Soft(),
-        ) as demo:
-            gr.Markdown("# VibeRobot: Vibe-to-Verify Workflow")
+def on_send(message: str, scene: str, chat_history: list):
+    """Handle user message: run pipeline, return chat history."""
+    if not message.strip():
+        return chat_history, "", gr.update(interactive=True), gr.update(interactive=True)
+
+    # Add user message
+    chat_history = chat_history + [{"role": "user", "content": message}]
+
+    # Run pipeline
+    try:
+        result = _state.run_command(message, scene)
+        response = _build_chat_response(result)
+        awaiting = result.stage == PipelineStage.AWAITING_APPROVAL
+    except Exception as e:
+        response = f"### Error\n{e}"
+        awaiting = False
+
+    chat_history = chat_history + [{"role": "assistant", "content": response}]
+
+    return (
+        chat_history,
+        "",                                                    # clear input
+        gr.update(interactive=awaiting, variant="primary" if awaiting else "secondary"),  # approve
+        gr.update(interactive=awaiting, variant="stop" if awaiting else "secondary"),     # reject
+    )
+
+
+def on_approve(chat_history: list):
+    result = _state.approve()
+    response = _build_exec_response(result)
+    if result:
+        _state.logger.log_execution_result(result.execution_results)
+    chat_history = chat_history + [{"role": "assistant", "content": response}]
+    return (
+        chat_history,
+        gr.update(interactive=False, variant="secondary"),
+        gr.update(interactive=False, variant="secondary"),
+    )
+
+
+def on_reject(chat_history: list):
+    _state.reject()
+    chat_history = chat_history + [
+        {"role": "assistant", "content": "Plan rejected. Send a new command to try again."}
+    ]
+    return (
+        chat_history,
+        gr.update(interactive=False, variant="secondary"),
+        gr.update(interactive=False, variant="secondary"),
+    )
+
+
+# ── Build UI ──────────────────────────────────────────────────────────────────
+
+def build_app() -> gr.Blocks:
+    with gr.Blocks(title="VibeRobot") as demo:
+
+        # ── Login screen ─────────────────────────────────────────
+        with gr.Column(visible=True, elem_classes="login-card") as login_section:
+            gr.Markdown("# VibeRobot")
             gr.Markdown(
-                "Give a natural language command to the robot arm. "
-                "The system will infer your intent, generate a plan, "
-                "and show a simulation preview before executing."
+                "Vibe-to-Verify for safe robotic manipulation.\n\n"
+                "Sign in with your ChatGPT account to start."
             )
+            login_btn = gr.Button(
+                "Sign in with ChatGPT",
+                variant="primary",
+                size="lg",
+                elem_classes="login-btn",
+            )
+            device_login_btn = gr.Button(
+                "Sign in with device code (SSH / headless)",
+                variant="secondary",
+                size="sm",
+                elem_classes="login-btn",
+            )
+            login_error = gr.Markdown("", visible=True)
 
-            # --- Screen 1: Command Input ---
+        # ── Main chat screen ─────────────────────────────────────
+        with gr.Column(visible=False, elem_classes="chat-wrap") as main_section:
+
+            # Header
+            with gr.Row(elem_classes="header-bar"):
+                gr.Markdown("## VibeRobot")
+                auth_status = gr.Markdown("", elem_id="auth-status")
+                logout_btn = gr.Button("Sign out", size="sm", visible=False)
+
+            # Scene selector
             with gr.Row():
-                with gr.Column(scale=2):
-                    scene_dropdown = gr.Dropdown(
-                        choices=list(TASK_PRESETS.keys()),
-                        value="wind_paper",
-                        label="Scene",
-                    )
-                    command_input = gr.Textbox(
-                        label="Your Command",
-                        placeholder='e.g. "날라가지 않게 막아!!" or "prevent the papers from flying away"',
-                        lines=2,
-                    )
-                    submit_btn = gr.Button("Send Command", variant="primary")
-                with gr.Column(scale=1):
-                    status_box = gr.Textbox(label="Status", interactive=False, lines=2)
+                scene_dropdown = gr.Dropdown(
+                    choices=list(TASK_PRESETS.keys()),
+                    value="wind_paper",
+                    label="Scene",
+                    scale=1,
+                    interactive=True,
+                )
+                scene_info = gr.Textbox(
+                    value=_scene_description("wind_paper"),
+                    label="Scene description",
+                    interactive=False,
+                    scale=3,
+                )
 
-            # --- Screen 2: Intent Confirmation ---
-            with gr.Accordion("Intent Inference (Theory of Mind)", open=True):
-                intent_display = gr.Markdown(label="Inferred Intent")
+            # Chat area
+            chatbot = gr.Chatbot(
+                label="Conversation",
+                height=480,
+                placeholder=(
+                    "Send a command to the robot arm.\n"
+                    "Try: \"prevent the papers from flying away\""
+                ),
+            )
 
-            # --- Screen 2b: Affordance Analysis ---
-            with gr.Accordion("Affordance Analysis (Gibson)", open=True):
-                affordance_display = gr.Markdown(label="Affordances")
-
-            # --- Screen 3: Plan + Safety Contract ---
+            # Input row
             with gr.Row():
-                with gr.Column():
-                    with gr.Accordion("Execution Plan", open=True):
-                        plan_display = gr.Markdown(label="Plan")
-                with gr.Column():
-                    with gr.Accordion("Safety Contract", open=True):
-                        safety_display = gr.Markdown(label="Safety")
+                msg_input = gr.Textbox(
+                    placeholder="Type a command...",
+                    show_label=False,
+                    scale=5,
+                    container=False,
+                )
+                send_btn = gr.Button("Send", variant="primary", scale=1, min_width=80)
 
-            # --- Screen 4: Simulation Preview + Approval ---
-            with gr.Accordion("Simulation Preview", open=True):
-                preview_image = gr.Image(label="Preview Frame", type="numpy")
-                with gr.Row():
-                    approve_btn = gr.Button("Approve & Execute", variant="primary")
-                    reject_reason = gr.Textbox(
-                        label="Rejection reason (optional)",
-                        placeholder="Why are you rejecting?",
-                        scale=2,
-                    )
-                    reject_btn = gr.Button("Reject", variant="stop")
+            # Action buttons (approve / reject)
+            with gr.Row(elem_classes="action-row"):
+                approve_btn = gr.Button(
+                    "Approve & Execute",
+                    variant="secondary",
+                    interactive=False,
+                    scale=1,
+                )
+                reject_btn = gr.Button(
+                    "Reject Plan",
+                    variant="secondary",
+                    interactive=False,
+                    scale=1,
+                )
 
-            # --- Screen 5: Result / Failure Card ---
-            with gr.Accordion("Execution Result", open=True):
-                result_status = gr.Textbox(label="Result", interactive=False)
-                result_detail = gr.Markdown(label="Details")
+        # ── Events ────────────────────────────────────────────────
 
-            # --- Event handlers ---
-            submit_btn.click(
-                fn=self._process_command,
-                inputs=[command_input, scene_dropdown],
-                outputs=[
-                    intent_display,
-                    affordance_display,
-                    plan_display,
-                    safety_display,
-                    preview_image,
-                    status_box,
-                ],
-            )
-
-            approve_btn.click(
-                fn=self._approve_execution,
-                inputs=[],
-                outputs=[result_status, preview_image, result_detail],
-            )
-
-            reject_btn.click(
-                fn=self._reject_execution,
-                inputs=[reject_reason],
-                outputs=[status_box],
-            )
-
-        return demo
-
-    def launch(self, **kwargs):
-        """Launch the Gradio app."""
-        cfg = get_config()
-        demo = self.build()
-        demo.launch(
-            server_name=kwargs.get("server_name", cfg["gradio_host"]),
-            server_port=kwargs.get("server_port", cfg["gradio_port"]),
-            share=kwargs.get("share", False),
+        # Check auth on load
+        demo.load(
+            fn=on_check_auth,
+            outputs=[login_section, main_section, auth_status, logout_btn],
         )
 
-
-# --- Display formatters ---
-
-def _format_intent_display(intent) -> str:
-    lines = [
-        f"**Command:** {intent.raw_command}",
-        f"**Literal meaning:** {intent.literal_meaning}",
-        f"**Intended meaning:** {intent.intended_meaning}",
-        f"**Immediate goal:** {intent.immediate_goal}",
-        f"**Deep goal:** {intent.deep_goal}",
-        f"**Target objects:** {', '.join(intent.target_objects)}",
-        f"**Implicit constraints:** {', '.join(intent.implicit_constraints)}",
-        f"**Confidence:** {intent.confidence:.0%}",
-    ]
-    if intent.reasoning:
-        lines.append(f"\n> {intent.reasoning}")
-    return "\n\n".join(lines)
-
-
-def _format_affordance_display(affordance) -> str:
-    lines = []
-    if affordance.recommended_object:
-        lines.append(
-            f"**Recommendation:** Use **{affordance.recommended_object}**'s "
-            f"*{affordance.recommended_affordance}* affordance"
+        # Login
+        login_btn.click(
+            fn=on_login,
+            outputs=[login_section, main_section, auth_status, logout_btn, login_error],
         )
-    lines.append("")
-    for oa in affordance.objects:
-        active = [f"{a.name} ({a.score:.2f})" for a in oa.active_affordances[:3]]
-        if active:
-            lines.append(f"- **{oa.object_name}** ({oa.object_category}): {', '.join(active)}")
-    if affordance.reasoning:
-        lines.append(f"\n```\n{affordance.reasoning}\n```")
-    return "\n".join(lines)
+        device_login_btn.click(
+            fn=on_login,  # falls back to device code if browser fails
+            outputs=[login_section, main_section, auth_status, logout_btn, login_error],
+        )
+
+        # Logout
+        logout_btn.click(
+            fn=on_logout,
+            outputs=[login_section, main_section, auth_status, logout_btn],
+        )
+
+        # Scene change
+        scene_dropdown.change(
+            fn=lambda s: _scene_description(s),
+            inputs=[scene_dropdown],
+            outputs=[scene_info],
+        )
+
+        # Send command
+        send_btn.click(
+            fn=on_send,
+            inputs=[msg_input, scene_dropdown, chatbot],
+            outputs=[chatbot, msg_input, approve_btn, reject_btn],
+        )
+        msg_input.submit(
+            fn=on_send,
+            inputs=[msg_input, scene_dropdown, chatbot],
+            outputs=[chatbot, msg_input, approve_btn, reject_btn],
+        )
+
+        # Approve / Reject
+        approve_btn.click(
+            fn=on_approve,
+            inputs=[chatbot],
+            outputs=[chatbot, approve_btn, reject_btn],
+        )
+        reject_btn.click(
+            fn=on_reject,
+            inputs=[chatbot],
+            outputs=[chatbot, approve_btn, reject_btn],
+        )
+
+    return demo
 
 
-def _format_plan_display(plan) -> str:
-    lines = [f"**{plan.plan_description}**", ""]
-    for i, step in enumerate(plan.steps, 1):
-        params_str = ""
-        if step.params:
-            params_str = f" `{step.params}`"
-        lines.append(f"{i}. **{step.action}**({step.target}){params_str}")
-        if step.description:
-            lines.append(f"   _{step.description}_")
-    lines.append(f"\nEstimated duration: {plan.estimated_duration:.0f}s | Risk: {plan.risk_level}")
-    return "\n".join(lines)
+def _scene_description(name: str) -> str:
+    descriptions = {
+        "wind_paper": "Wind blowing loose papers on a desk with a book nearby.",
+        "pick_and_place": "Simple pick-and-place: move the red cube to the blue bin.",
+        "sorting": "Sort three fruits from the desk into a container.",
+    }
+    return descriptions.get(name, "")
 
 
-def _format_safety_display(contract) -> str:
-    display = contract.to_display_dict()
-    lines = ["**Safety Contract**", ""]
-
-    lines.append("**Preconditions:**")
-    for c in display["preconditions"]:
-        icon = _severity_icon(c["severity"])
-        lines.append(f"- {icon} {c['description']}")
-
-    lines.append("\n**Invariants (during execution):**")
-    for c in display["invariants"]:
-        icon = _severity_icon(c["severity"])
-        lines.append(f"- {icon} {c['description']}")
-
-    lines.append("\n**Tripwires (emergency stop):**")
-    for c in display["tripwires"]:
-        lines.append(f"- {c['description']}")
-
-    limits = display["limits"]
-    lines.append(f"\n**Limits:** max speed={limits['max_velocity_m_s']}m/s, max torque={limits['max_torque_Nm']}Nm")
-    return "\n".join(lines)
-
-
-def _format_failure_card(card) -> str:
-    icon = _severity_icon(card.severity)
-    lines = [
-        f"## {icon} {card.title}",
-        f"**What happened:** {card.what_happened}",
-        f"**Why:** {card.why}",
-        "",
-        "**Suggested fixes:**",
-    ]
-    for fix in card.suggested_fixes:
-        lines.append(f"- {fix}")
-    if card.can_auto_fix:
-        lines.append(f"\n*Auto-fix available: {card.patch_description}*")
-    return "\n".join(lines)
-
-
-def _format_execution_results(results: list[dict]) -> str:
-    lines = ["**Execution Results:**", ""]
-    for r in results:
-        icon = "+" if r.get("success") else "x"
-        lines.append(f"- [{icon}] Step {r.get('step', '?')}: {r.get('action', '')}({r.get('target', '')}) — {r.get('message', '')}")
-    return "\n".join(lines)
-
-
-def _severity_icon(severity: str) -> str:
-    return {
-        "info": "[i]",
-        "warning": "[!]",
-        "error": "[!!]",
-        "critical": "[!!!]",
-        "halt": "[!!]",
-        "emergency_stop": "[!!!]",
-    }.get(severity, "[-]")
-
-
-# --- Entry point ---
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    app = VibeRobotUI()
-    app.launch()
+    cfg = get_config()
+    demo = build_app()
+    demo.launch(
+        server_name=cfg["gradio_host"],
+        server_port=cfg["gradio_port"],
+        share=False,
+        css="""
+            .login-card { max-width: 460px; margin: 80px auto; padding: 40px;
+                          border: 1px solid #e0e0e0; border-radius: 16px;
+                          text-align: center; background: #fafafa; }
+            .login-card h1 { margin-bottom: 4px; font-size: 28px; }
+            .login-card p { color: #666; margin-bottom: 24px; font-size: 15px; }
+            .login-btn { width: 100% !important; }
+            .chat-wrap { max-width: 820px; margin: 0 auto; }
+            .header-bar { display: flex; justify-content: space-between;
+                          align-items: center; padding: 12px 0; margin-bottom: 4px;
+                          border-bottom: 1px solid #eee; }
+            .header-bar h2 { margin: 0; font-size: 18px; }
+            .action-row button { min-width: 120px; }
+        """,
+    )
 
 
 if __name__ == "__main__":

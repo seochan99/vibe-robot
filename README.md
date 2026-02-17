@@ -1,10 +1,10 @@
-# VibeRobot: Vibe-to-Verify for Safe Robotic Manipulation
+# VibeRobot! — Vibe-to-Verify for Safe Robotic Manipulation
 
 > Bridging the gap between natural language "vibe coding" and safe physical robot execution.
 
 ## Overview
 
-VibeRobot enables users to control a robot arm using vague, natural language commands (e.g., "prevent it from flying away!!"). The system:
+VibeRobot! enables users to control a robot arm using vague, natural language commands (e.g., "prevent it from flying away!!"). The system:
 
 1. **Infers intent** using Theory of Mind — understanding what users *mean*, not just what they *say*
 2. **Discovers affordances** using Gibson's ecological psychology — finding latent object capabilities activated by context
@@ -29,27 +29,29 @@ Layer 3: Robot Arm Simulator (MuJoCo + Franka Panda + Preview System)
 git clone https://github.com/seochan99/vibe-robot.git
 cd vibe-robot
 
-# Create virtual environment (Python 3.12 recommended)
+# Python backend
 python3.12 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Download Franka Panda model
 git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie.git assets/mujoco_menagerie
+
+# Next.js frontend
+cd web && npm install && cd ..
 
 # Run tests
 pytest tests/ -v
 
-# Launch UI
-python -m ui.gradio_app
+# Start both servers
+python api/server.py &          # Backend on :8000
+cd web && npm run dev            # Frontend on :3000
 ```
+
+Open http://localhost:3000 for the landing page, or http://localhost:3000/app for the chat interface.
 
 ## Key Demo: Wind + Paper Scenario
 
 ```
-User: "날라가지 않게 막아!!" (Prevent it from flying away!!)
+User: "Prevent it from flying away!!"
   ↓
 Intent: Secure loose papers against wind disturbance
   ↓
@@ -68,12 +70,16 @@ Safety Contract → Sim Preview → User Approval → Execute
 | Robot Model | Franka Panda (MuJoCo Menagerie) |
 | IK/FK | roboticstoolbox-python |
 | VLM/LLM | ChatGPT OAuth / GPT-4o API (pluggable) |
-| UI | Gradio |
+| Frontend | Next.js + Tailwind CSS + TypeScript |
+| Backend API | FastAPI |
 
 ## Authentication: ChatGPT Login (No API Key Needed)
 
-VibeRobot supports **ChatGPT Plus/Pro subscription login** — no API key required.
+VibeRobot! supports **ChatGPT Plus/Pro subscription login** — no API key required.
 This uses the same OAuth mechanism as OpenCode, OpenClaw, and OpenAI's Codex CLI.
+
+You can use the app without logging in (demo mode with rule-based inference).
+Connect ChatGPT for full AI-powered analysis.
 
 ```bash
 # Login with ChatGPT account (opens browser)
@@ -84,9 +90,6 @@ python auth_cli.py login --device
 
 # Check auth status
 python auth_cli.py status
-
-# List available providers
-python auth_cli.py providers
 ```
 
 ### Provider Priority (auto mode)
@@ -97,16 +100,16 @@ python auth_cli.py providers
 | 2 | `codex_cli` | OpenAI Codex CLI (`npm i -g @openai/codex`) |
 | 3 | `openai_api` | Standard API key (`$OPENAI_API_KEY`) |
 
-The system auto-detects the first available authenticated provider.
-
 ## Project Structure
 
 ```
 viberobot/
+├── web/                # Next.js frontend (landing page + chat UI)
+├── api/                # FastAPI backend (REST API for pipeline)
 ├── providers/          # LLM provider abstraction (ChatGPT OAuth, OpenAI API, Codex CLI)
 ├── simulator/          # MuJoCo environment, Franka controller, scene builder
 ├── core/               # AI pipeline: intent, affordance, planner, safety
-├── ui/                 # Gradio app, failure cards
+├── ui/                 # Legacy Gradio app, failure cards
 ├── study/              # User study: tasks, instruments, logging
 └── tests/              # Unit + integration tests (47 tests)
 ```
