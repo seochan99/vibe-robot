@@ -50,7 +50,7 @@ const CAPABILITIES = [
 ];
 
 const STACK = [
-  "MuJoCo 3.5", "Franka Panda", "GPT-4o", "Python",
+  "MuJoCo 3.5", "Franka Panda", "ChatGPT", "Python",
   "Next.js", "FastAPI", "TypeScript", "roboticstoolbox",
 ];
 
