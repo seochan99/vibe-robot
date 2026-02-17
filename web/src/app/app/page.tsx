@@ -37,6 +37,13 @@ const FALLBACK_MODELS: AIModel[] = [
   { id: "rule_based", name: "Rule-Based (No AI)", requires_auth: false },
 ];
 
+const CHATGPT_MODELS: AIModel[] = [
+  { id: "rule_based", name: "Rule-Based (No AI)", requires_auth: false },
+  { id: "gpt-4o", name: "GPT-4o", requires_auth: true },
+  { id: "o3", name: "o3", requires_auth: true },
+  { id: "o4-mini", name: "o4-mini", requires_auth: true },
+];
+
 const SCENES = [
   { id: "wind_paper", label: "Wind & Papers", desc: "Papers blowing on a desk with a book nearby." },
   { id: "pick_and_place", label: "Pick & Place", desc: "Move the red cube to the blue bin." },
@@ -151,8 +158,16 @@ export default function AppPage() {
 
   // Check auth (client-side) + fetch models on mount
   useEffect(() => {
-    setAuth(getAuthStatus());
-    fetchModels().then((m) => { if (m.length > 0) setModels(m); });
+    const status = getAuthStatus();
+    setAuth(status);
+    fetchModels().then((m) => {
+      if (m.length > 0) {
+        setModels(m);
+      } else if (status.authenticated) {
+        // Backend unreachable but user has ChatGPT tokens — show client-side models
+        setModels(CHATGPT_MODELS);
+      }
+    });
   }, []);
 
   // Close dropdowns on outside click
@@ -190,6 +205,26 @@ export default function AppPage() {
   const addMessage = useCallback((msg: Omit<ChatMessage, "id" | "timestamp">) => {
     setMessages((prev) => [...prev, { ...msg, id: msgId(), timestamp: Date.now() }]);
   }, []);
+
+  // Listen for auth changes from popup callback page (storage event)
+  useEffect(() => {
+    const handler = (e: StorageEvent) => {
+      if (e.key === "viberobot_oauth" && e.newValue) {
+        const status = getAuthStatus();
+        if (status.authenticated) {
+          setAuth(status);
+          setAuthModal(null);
+          setCallbackUrl("");
+          if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+          popupRef.current?.close();
+          addMessage({ role: "system", content: "ChatGPT connected! You can now use AI-powered models." });
+          fetchModels().then((m) => { setModels(m.length > 0 ? m : CHATGPT_MODELS); });
+        }
+      }
+    };
+    window.addEventListener("storage", handler);
+    return () => window.removeEventListener("storage", handler);
+  }, [addMessage]);
 
   // Send command
   const handleSend = useCallback(async () => {
@@ -263,6 +298,8 @@ export default function AppPage() {
       setAuthModal(null);
       setCallbackUrl("");
       addMessage({ role: "system", content: "ChatGPT connected! You can now use AI-powered models." });
+      // Refresh models
+      fetchModels().then((m) => { setModels(m.length > 0 ? m : CHATGPT_MODELS); });
     } catch (e) {
       setAuthModal((prev) => prev ? { ...prev, phase: "paste" } : null);
       addMessage({

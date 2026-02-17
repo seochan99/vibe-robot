@@ -22,7 +22,12 @@ function CallbackContent() {
         }
         await exchangeCode(code);
         setStatus("success");
-        setTimeout(() => router.push("/app"), 1200);
+        // If we're in a popup, close it — the parent detects auth via storage event
+        if (window.opener) {
+          setTimeout(() => window.close(), 600);
+        } else {
+          setTimeout(() => router.push("/app"), 1200);
+        }
       } catch (e) {
         setStatus("error");
         setError(e instanceof Error ? e.message : "Unknown error");
