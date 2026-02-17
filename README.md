@@ -67,22 +67,52 @@ Safety Contract → Sim Preview → User Approval → Execute
 | Simulator | MuJoCo 3.5 |
 | Robot Model | Franka Panda (MuJoCo Menagerie) |
 | IK/FK | roboticstoolbox-python |
-| VLM/LLM | GPT-4o (API) |
+| VLM/LLM | ChatGPT OAuth / GPT-4o API (pluggable) |
 | UI | Gradio |
+
+## Authentication: ChatGPT Login (No API Key Needed)
+
+VibeRobot supports **ChatGPT Plus/Pro subscription login** — no API key required.
+This uses the same OAuth mechanism as OpenCode, OpenClaw, and OpenAI's Codex CLI.
+
+```bash
+# Login with ChatGPT account (opens browser)
+python auth_cli.py login
+
+# For SSH/headless environments
+python auth_cli.py login --device
+
+# Check auth status
+python auth_cli.py status
+
+# List available providers
+python auth_cli.py providers
+```
+
+### Provider Priority (auto mode)
+
+| Priority | Provider | Auth Method |
+|----------|----------|-------------|
+| 1 | `chatgpt_oauth` | ChatGPT Plus/Pro login (browser OAuth) |
+| 2 | `codex_cli` | OpenAI Codex CLI (`npm i -g @openai/codex`) |
+| 3 | `openai_api` | Standard API key (`$OPENAI_API_KEY`) |
+
+The system auto-detects the first available authenticated provider.
 
 ## Project Structure
 
 ```
 viberobot/
+├── providers/          # LLM provider abstraction (ChatGPT OAuth, OpenAI API, Codex CLI)
 ├── simulator/          # MuJoCo environment, Franka controller, scene builder
 ├── core/               # AI pipeline: intent, affordance, planner, safety
 ├── ui/                 # Gradio app, failure cards
 ├── study/              # User study: tasks, instruments, logging
-└── tests/              # Unit + integration tests
+└── tests/              # Unit + integration tests (47 tests)
 ```
 
 ## Tests
 
 ```bash
-pytest tests/ -v  # 32 tests covering smoke, affordance, and E2E pipeline
+pytest tests/ -v  # 47 tests covering smoke, affordance, pipeline, and providers
 ```

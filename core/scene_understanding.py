@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 
-from config import OPENAI_API_KEY, ANTHROPIC_API_KEY, get_config
+from config import get_config
 
 
 @dataclass
@@ -80,10 +80,11 @@ Respond in JSON only:
 class SceneUnderstanding:
     """Analyzes scene using VLM (GPT-4o or Claude Vision)."""
 
-    def __init__(self, vlm_backend: str = None, vlm_model: str = None):
+    def __init__(self, vlm_backend: str = None, vlm_model: str = None, provider=None):
         cfg = get_config()
         self._backend = vlm_backend or cfg["vlm_backend"]
         self._model = vlm_model or cfg["vlm_model"]
+        self._provider = provider  # LLMProvider instance (lazy-loaded if None)
         self._cache: dict[str, SceneState] = {}
 
     def analyze_from_metadata(
@@ -143,63 +144,26 @@ class SceneUnderstanding:
         """
         image_b64 = _encode_image(image)
 
-        if self._backend == "api" and "gpt" in self._model:
-            result = await self._call_openai_vision(image_b64, additional_context)
-        elif self._backend == "api" and "claude" in self._model:
-            result = await self._call_claude_vision(image_b64, additional_context)
-        else:
-            raise ValueError(f"Unsupported VLM backend: {self._backend}/{self._model}")
+        # Use provider abstraction for vision analysis
+        provider = self._get_provider()
+        prompt = SCENE_ANALYSIS_PROMPT_WITH_IMAGE
+        if additional_context:
+            prompt += f"\n\nAdditional context: {additional_context}"
 
+        response = await provider.generate(
+            prompt,
+            images=[image_b64],
+            json_mode=True,
+            max_tokens=1000,
+        )
+        result = response.parse_json()
         return _parse_vlm_response(result)
 
-    async def _call_openai_vision(self, image_b64: str, context: str) -> dict:
-        """Call GPT-4o Vision API."""
-        import openai
-
-        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-        prompt = SCENE_ANALYSIS_PROMPT_WITH_IMAGE
-        if context:
-            prompt += f"\n\nAdditional context: {context}"
-
-        response = await client.chat.completions.create(
-            model=self._model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
-                ],
-            }],
-            max_tokens=1000,
-            response_format={"type": "json_object"},
-        )
-        return json.loads(response.choices[0].message.content)
-
-    async def _call_claude_vision(self, image_b64: str, context: str) -> dict:
-        """Call Claude Vision API."""
-        import anthropic
-
-        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-        prompt = SCENE_ANALYSIS_PROMPT_WITH_IMAGE
-        if context:
-            prompt += f"\n\nAdditional context: {context}"
-
-        response = await client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=1000,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_b64}},
-                    {"type": "text", "text": prompt},
-                ],
-            }],
-        )
-        text = response.content[0].text
-        # Extract JSON from response
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        return json.loads(text[start:end])
+    def _get_provider(self):
+        if self._provider is None:
+            from providers.setup import get_provider
+            self._provider = get_provider()
+        return self._provider
 
     def clear_cache(self) -> None:
         self._cache.clear()

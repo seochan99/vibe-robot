@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
-from config import OPENAI_API_KEY, get_config
+from config import get_config
 
 
 @dataclass
@@ -67,9 +67,10 @@ Respond in JSON:
 class IntentInference:
     """Infers structured user intent from natural language commands."""
 
-    def __init__(self, llm_model: str = None):
+    def __init__(self, llm_model: str = None, provider=None):
         cfg = get_config()
         self._model = llm_model or cfg["llm_model"]
+        self._provider = provider  # LLMProvider instance (lazy-loaded if None)
         self._cache: dict[str, UserIntent] = {}
 
     async def infer(
@@ -115,22 +116,23 @@ class IntentInference:
         self._cache[cache_key] = intent
         return intent
 
-    async def _call_llm(self, prompt: str) -> dict:
-        """Call LLM API for intent inference."""
-        import openai
+    def _get_provider(self):
+        if self._provider is None:
+            from providers.setup import get_provider
+            self._provider = get_provider()
+        return self._provider
 
-        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-        response = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": "You are a Theory of Mind reasoning engine."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=800,
-            response_format={"type": "json_object"},
+    async def _call_llm(self, prompt: str) -> dict:
+        """Call LLM via provider abstraction."""
+        provider = self._get_provider()
+        response = await provider.generate(
+            prompt,
+            system_prompt="You are a Theory of Mind reasoning engine.",
+            json_mode=True,
             temperature=0.3,
+            max_tokens=800,
         )
-        return json.loads(response.choices[0].message.content)
+        return response.parse_json()
 
     def clear_cache(self) -> None:
         self._cache.clear()

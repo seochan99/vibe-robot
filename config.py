@@ -12,6 +12,7 @@ ENV = os.getenv("VIBEROBOT_ENV", "local")  # "local" or "server"
 
 CONFIG = {
     "local": {
+        "llm_provider": "auto",         # "chatgpt_oauth", "openai_api", "codex_cli", "auto"
         "vlm_backend": "api",           # GPT-4o API
         "vlm_model": "gpt-4o",
         "llm_model": "gpt-4o",
@@ -21,6 +22,7 @@ CONFIG = {
         "gradio_port": 7860,
     },
     "server": {
+        "llm_provider": "auto",
         "vlm_backend": "local",          # Local VLM (LLaVA/CogVLM)
         "vlm_model": "llava-v1.6",
         "llm_model": "gpt-4o",

@@ -41,6 +41,7 @@ tmp*.xml
 # pytest
 .pytest_cache/
 
-# Environment
+# Environment / Credentials
 .env
 .env.local
+auth.json

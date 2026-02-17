@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
-from config import OPENAI_API_KEY, get_config
+from config import get_config
 from core.affordance_engine import AffordanceAnalysis
 from core.intent_inference import UserIntent
 from core.scene_understanding import SceneState
@@ -80,9 +80,10 @@ Generate a plan in JSON:
 class Planner:
     """Generates execution plans from scene analysis and user intent."""
 
-    def __init__(self, llm_model: str = None):
+    def __init__(self, llm_model: str = None, provider=None):
         cfg = get_config()
         self._model = llm_model or cfg["llm_model"]
+        self._provider = provider
 
     async def generate_plan(
         self,
@@ -312,22 +313,23 @@ class Planner:
             requires_approval=True,
         )
 
-    async def _call_llm(self, prompt: str) -> dict:
-        """Call LLM API for plan generation."""
-        import openai
+    def _get_provider(self):
+        if self._provider is None:
+            from providers.setup import get_provider
+            self._provider = get_provider()
+        return self._provider
 
-        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-        response = await client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": "You are a robotic task planner."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=1000,
-            response_format={"type": "json_object"},
+    async def _call_llm(self, prompt: str) -> dict:
+        """Call LLM via provider abstraction."""
+        provider = self._get_provider()
+        response = await provider.generate(
+            prompt,
+            system_prompt="You are a robotic task planner.",
+            json_mode=True,
             temperature=0.2,
+            max_tokens=1000,
         )
-        return json.loads(response.choices[0].message.content)
+        return response.parse_json()
 
 
 def _format_scene(scene: SceneState) -> str:
