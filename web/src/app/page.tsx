@@ -4,6 +4,7 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { motion, useScroll, useTransform } from "framer-motion";
 import { useRef } from "react";
+import SignupForm from "@/components/SignupForm";
 
 const RobotArm3D = dynamic(() => import("@/components/RobotArm3D"), {
   ssr: false,
@@ -462,6 +463,39 @@ export default function LandingPage() {
             </Link>
           </motion.div>
         </motion.div>
+      </section>
+
+      {/* ── Waitlist / Contact ──────────────────────────────────────────────── */}
+      <section className="py-20 px-6 border-t border-[var(--border)] bg-[var(--surface)]">
+        <div className="max-w-[1100px] mx-auto">
+          <motion.div
+            initial="hidden" whileInView="visible"
+            viewport={{ once: true }}
+            variants={{ visible: { transition: { staggerChildren: 0.1 } } }}
+          >
+            <motion.p
+              variants={reveal}
+              className="font-mono text-xs uppercase tracking-wider text-[var(--muted)] mb-3"
+            >
+              Stay in the loop
+            </motion.p>
+            <motion.h2
+              variants={reveal}
+              className="text-2xl sm:text-3xl font-bold tracking-tight mb-3"
+            >
+              Get notified when we launch.
+            </motion.h2>
+            <motion.p
+              variants={reveal}
+              className="text-[var(--muted)] mb-6 max-w-md"
+            >
+              Drop your email for updates on new features, user study openings, and paper releases.
+            </motion.p>
+            <motion.div variants={reveal}>
+              <SignupForm />
+            </motion.div>
+          </motion.div>
+        </div>
       </section>
 
       {/* ── Footer ──────────────────────────────────────────────────────────── */}
