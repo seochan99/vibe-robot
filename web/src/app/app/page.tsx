@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import type {
   AIModel,
   ExecutionResponse,
@@ -144,10 +144,8 @@ export default function AppPage() {
   const [awaitingApproval, setAwaitingApproval] = useState(false);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
-  const [authModal, setAuthModal] = useState<{ authUrl: string; phase: "waiting" | "paste" } | null>(null);
+  const [authModal, setAuthModal] = useState<{ authUrl: string } | null>(null);
   const [callbackUrl, setCallbackUrl] = useState("");
-  const popupRef = useRef<Window | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [sceneOpen, setSceneOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [models, setModels] = useState<AIModel[]>(FALLBACK_MODELS);
@@ -215,8 +213,6 @@ export default function AppPage() {
           setAuth(status);
           setAuthModal(null);
           setCallbackUrl("");
-          if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-          popupRef.current?.close();
           addMessage({ role: "system", content: "ChatGPT connected! You can now use AI-powered models." });
           fetchModels().then((m) => { setModels(m.length > 0 ? m : CHATGPT_MODELS); });
         }
@@ -285,11 +281,28 @@ export default function AppPage() {
     });
   }, [addMessage]);
 
-  // Auth — popup PKCE flow with auto-detect + fallback paste
-  const finishLogin = useCallback(async (code: string) => {
+  // Auth — open new tab + auto-detect via storage event
+  const handleLogin = useCallback(async () => {
+    try {
+      const flow = await createAuthFlow();
+      setCallbackUrl("");
+      // Open in a new tab (not popup — popups get blocked)
+      window.open(flow.authUrl, "_blank");
+      setAuthModal({ authUrl: flow.authUrl });
+    } catch (e) {
+      addMessage({
+        role: "system",
+        content: `Failed to start login: ${e instanceof Error ? e.message : "Unknown error"}`,
+      });
+    }
+  }, [addMessage]);
+
+  const handleLoginComplete = useCallback(async () => {
+    const parsed = parseCallbackUrl(callbackUrl);
+    if (!parsed) return;
     setAuthLoading(true);
     try {
-      const tokens = await exchangeCode(code);
+      const tokens = await exchangeCode(parsed.code);
       setAuth({
         authenticated: true,
         plan: tokens.plan_type || "connected",
@@ -298,10 +311,8 @@ export default function AppPage() {
       setAuthModal(null);
       setCallbackUrl("");
       addMessage({ role: "system", content: "ChatGPT connected! You can now use AI-powered models." });
-      // Refresh models
       fetchModels().then((m) => { setModels(m.length > 0 ? m : CHATGPT_MODELS); });
     } catch (e) {
-      setAuthModal((prev) => prev ? { ...prev, phase: "paste" } : null);
       addMessage({
         role: "system",
         content: `Connection failed: ${e instanceof Error ? e.message : "Unknown error"}`,
@@ -309,71 +320,11 @@ export default function AppPage() {
     } finally {
       setAuthLoading(false);
     }
-  }, [addMessage]);
-
-  const handleLogin = useCallback(async () => {
-    try {
-      const flow = await createAuthFlow();
-      setCallbackUrl("");
-
-      // Open popup
-      const popup = window.open(
-        flow.authUrl,
-        "chatgpt_auth",
-        "width=500,height=700,left=200,top=100"
-      );
-      popupRef.current = popup;
-      setAuthModal({ authUrl: flow.authUrl, phase: "waiting" });
-
-      // Poll for auth code in popup URL
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = setInterval(() => {
-        try {
-          if (!popup || popup.closed) {
-            clearInterval(pollRef.current!);
-            pollRef.current = null;
-            // Check if auth succeeded while popup was open
-            const status = getAuthStatus();
-            if (status.authenticated) {
-              setAuth(status);
-              setAuthModal(null);
-            } else {
-              // Show paste fallback
-              setAuthModal({ authUrl: flow.authUrl, phase: "paste" });
-            }
-            return;
-          }
-          // Try reading popup URL (works when popup is on localhost)
-          const url = popup.location.href;
-          if (url && url.includes("code=")) {
-            clearInterval(pollRef.current!);
-            pollRef.current = null;
-            popup.close();
-            const parsed = parseCallbackUrl(url);
-            if (parsed) finishLogin(parsed.code);
-          }
-        } catch {
-          // Cross-origin (auth.openai.com) — keep polling
-        }
-      }, 500);
-    } catch (e) {
-      addMessage({
-        role: "system",
-        content: `Failed to start login: ${e instanceof Error ? e.message : "Unknown error"}`,
-      });
-    }
-  }, [addMessage, finishLogin]);
-
-  const handleLoginComplete = useCallback(async () => {
-    const parsed = parseCallbackUrl(callbackUrl);
-    if (!parsed) return;
-    finishLogin(parsed.code);
-  }, [callbackUrl, finishLogin]);
+  }, [callbackUrl, addMessage]);
 
   const handleLogout = useCallback(() => {
     clearTokens();
     setAuth({ authenticated: false });
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   }, []);
 
   // Speech-to-text
@@ -453,77 +404,65 @@ export default function AppPage() {
       {authModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
           <div className="bg-[var(--background)] border border-[var(--border)] rounded-xl max-w-md w-full p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-5">
+            <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold">Connect ChatGPT</h3>
               <button
-                onClick={() => {
-                  setAuthModal(null);
-                  setCallbackUrl("");
-                  if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-                  popupRef.current?.close();
-                }}
+                onClick={() => { setAuthModal(null); setCallbackUrl(""); }}
                 className="text-[var(--muted)] hover:text-[var(--foreground)] text-lg leading-none"
               >
                 &times;
               </button>
             </div>
 
-            {authModal.phase === "waiting" ? (
-              /* Phase 1: Waiting for popup login */
-              <div className="text-center py-4">
-                <div className="w-8 h-8 border-2 border-[#10a37f] border-t-transparent rounded-full animate-spin mx-auto" />
-                <p className="mt-4 text-sm">Waiting for ChatGPT login...</p>
-                <p className="mt-1 text-xs text-[var(--muted)]">Complete the sign-in in the popup window.</p>
-                <button
-                  onClick={() => {
-                    if (popupRef.current && !popupRef.current.closed) {
-                      popupRef.current.focus();
-                    } else {
-                      popupRef.current = window.open(authModal.authUrl, "chatgpt_auth", "width=500,height=700,left=200,top=100");
-                    }
-                  }}
-                  className="mt-4 text-xs text-[#10a37f] hover:underline"
-                >
-                  Reopen login popup
-                </button>
-              </div>
-            ) : (
-              /* Phase 2: Paste fallback */
-              <div className="space-y-3 text-sm">
-                <p className="text-[var(--muted)]">
-                  After logging in, the popup showed an error page.
-                  Copy the <strong className="text-[var(--foreground)]">full URL</strong> from that page&apos;s address bar and paste it here:
-                </p>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={callbackUrl}
-                    onChange={(e) => setCallbackUrl(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && callbackUrl.trim()) handleLoginComplete(); }}
-                    // eslint-disable-next-line jsx-a11y/no-autofocus
-                    autoFocus
-                    placeholder="http://localhost:1455/auth/callback?code=..."
-                    className="flex-1 min-w-0 px-3 py-2.5 text-xs font-mono rounded-md border border-[var(--border)] bg-[var(--surface)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[#10a37f]/50"
-                  />
-                  <button
-                    onClick={handleLoginComplete}
-                    disabled={!callbackUrl.trim() || authLoading}
-                    className="px-4 py-2.5 text-xs font-medium rounded-md bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors disabled:opacity-40 shrink-0"
+            <div className="space-y-4 text-sm">
+              {/* Step 1 */}
+              <div className="flex gap-3">
+                <span className="shrink-0 w-6 h-6 rounded-full bg-[#10a37f] text-white text-xs flex items-center justify-center font-bold">1</span>
+                <div>
+                  <p className="font-medium">Sign in to ChatGPT</p>
+                  <a
+                    href={authModal.authUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block mt-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors"
                   >
-                    {authLoading ? "..." : "Connect"}
-                  </button>
+                    Open ChatGPT Login
+                  </a>
                 </div>
-                <button
-                  onClick={() => {
-                    popupRef.current = window.open(authModal.authUrl, "chatgpt_auth", "width=500,height=700,left=200,top=100");
-                    setAuthModal({ authUrl: authModal.authUrl, phase: "waiting" });
-                  }}
-                  className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
-                >
-                  Try again
-                </button>
               </div>
-            )}
+
+              {/* Step 2 */}
+              <div className="flex gap-3">
+                <span className="shrink-0 w-6 h-6 rounded-full bg-[var(--foreground)] text-[var(--background)] text-xs flex items-center justify-center font-bold">2</span>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium">Paste the redirect URL</p>
+                  <p className="text-xs text-[var(--muted)] mt-0.5">
+                    After login, copy the URL from the new tab and paste it here.
+                  </p>
+                  <div className="flex gap-2 mt-2">
+                    <input
+                      type="text"
+                      value={callbackUrl}
+                      onChange={(e) => setCallbackUrl(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && callbackUrl.trim()) handleLoginComplete(); }}
+                      placeholder="Paste URL here..."
+                      className="flex-1 min-w-0 px-3 py-2 text-xs font-mono rounded-md border border-[var(--border)] bg-[var(--surface)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[#10a37f]/50"
+                    />
+                    <button
+                      onClick={handleLoginComplete}
+                      disabled={!callbackUrl.trim() || authLoading}
+                      className="px-4 py-2 text-xs font-medium rounded-md bg-[var(--foreground)] hover:opacity-80 text-[var(--background)] transition-colors disabled:opacity-40 shrink-0"
+                    >
+                      {authLoading ? "..." : "Connect"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-[10px] text-[var(--muted)] leading-relaxed">
+                If the auth-relay server is running locally, this step happens automatically.
+              </p>
+            </div>
           </div>
         </div>
       )}
