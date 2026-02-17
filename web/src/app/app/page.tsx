@@ -137,8 +137,10 @@ export default function AppPage() {
   const [awaitingApproval, setAwaitingApproval] = useState(false);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
-  const [authModal, setAuthModal] = useState<{ authUrl: string } | null>(null);
+  const [authModal, setAuthModal] = useState<{ authUrl: string; phase: "waiting" | "paste" } | null>(null);
   const [callbackUrl, setCallbackUrl] = useState("");
+  const popupRef = useRef<Window | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [sceneOpen, setSceneOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [models, setModels] = useState<AIModel[]>(FALLBACK_MODELS);
@@ -248,30 +250,11 @@ export default function AppPage() {
     });
   }, [addMessage]);
 
-  // Auth — client-side PKCE flow with manual callback
-  const handleLogin = useCallback(async () => {
-    try {
-      const flow = await createAuthFlow();
-      setAuthModal({ authUrl: flow.authUrl });
-      setCallbackUrl("");
-      window.open(flow.authUrl, "_blank");
-    } catch (e) {
-      addMessage({
-        role: "system",
-        content: `Failed to start login: ${e instanceof Error ? e.message : "Unknown error"}`,
-      });
-    }
-  }, [addMessage]);
-
-  const handleLoginComplete = useCallback(async () => {
-    const parsed = parseCallbackUrl(callbackUrl);
-    if (!parsed) {
-      addMessage({ role: "system", content: "Invalid URL. Please paste the full URL from the address bar." });
-      return;
-    }
+  // Auth — popup PKCE flow with auto-detect + fallback paste
+  const finishLogin = useCallback(async (code: string) => {
     setAuthLoading(true);
     try {
-      const tokens = await exchangeCode(parsed.code);
+      const tokens = await exchangeCode(code);
       setAuth({
         authenticated: true,
         plan: tokens.plan_type || "connected",
@@ -281,6 +264,7 @@ export default function AppPage() {
       setCallbackUrl("");
       addMessage({ role: "system", content: "ChatGPT connected! You can now use AI-powered models." });
     } catch (e) {
+      setAuthModal((prev) => prev ? { ...prev, phase: "paste" } : null);
       addMessage({
         role: "system",
         content: `Connection failed: ${e instanceof Error ? e.message : "Unknown error"}`,
@@ -288,11 +272,71 @@ export default function AppPage() {
     } finally {
       setAuthLoading(false);
     }
-  }, [callbackUrl, addMessage]);
+  }, [addMessage]);
+
+  const handleLogin = useCallback(async () => {
+    try {
+      const flow = await createAuthFlow();
+      setCallbackUrl("");
+
+      // Open popup
+      const popup = window.open(
+        flow.authUrl,
+        "chatgpt_auth",
+        "width=500,height=700,left=200,top=100"
+      );
+      popupRef.current = popup;
+      setAuthModal({ authUrl: flow.authUrl, phase: "waiting" });
+
+      // Poll for auth code in popup URL
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(() => {
+        try {
+          if (!popup || popup.closed) {
+            clearInterval(pollRef.current!);
+            pollRef.current = null;
+            // Check if auth succeeded while popup was open
+            const status = getAuthStatus();
+            if (status.authenticated) {
+              setAuth(status);
+              setAuthModal(null);
+            } else {
+              // Show paste fallback
+              setAuthModal({ authUrl: flow.authUrl, phase: "paste" });
+            }
+            return;
+          }
+          // Try reading popup URL (works when popup is on localhost)
+          const url = popup.location.href;
+          if (url && url.includes("code=")) {
+            clearInterval(pollRef.current!);
+            pollRef.current = null;
+            popup.close();
+            const parsed = parseCallbackUrl(url);
+            if (parsed) finishLogin(parsed.code);
+          }
+        } catch {
+          // Cross-origin (auth.openai.com) — keep polling
+        }
+      }, 500);
+    } catch (e) {
+      addMessage({
+        role: "system",
+        content: `Failed to start login: ${e instanceof Error ? e.message : "Unknown error"}`,
+      });
+    }
+  }, [addMessage, finishLogin]);
+
+  const handleLoginComplete = useCallback(async () => {
+    const parsed = parseCallbackUrl(callbackUrl);
+    if (!parsed) return;
+    finishLogin(parsed.code);
+  }, [callbackUrl, finishLogin]);
 
   const handleLogout = useCallback(() => {
     clearTokens();
     setAuth({ authenticated: false });
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   }, []);
 
   // Speech-to-text
@@ -371,59 +415,78 @@ export default function AppPage() {
       {/* Auth modal */}
       {authModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-[var(--background)] border border-[var(--border)] rounded-xl max-w-lg w-full p-6 shadow-2xl">
-            <div className="flex items-center justify-between mb-4">
+          <div className="bg-[var(--background)] border border-[var(--border)] rounded-xl max-w-md w-full p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-5">
               <h3 className="font-semibold">Connect ChatGPT</h3>
               <button
-                onClick={() => { setAuthModal(null); setCallbackUrl(""); }}
+                onClick={() => {
+                  setAuthModal(null);
+                  setCallbackUrl("");
+                  if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+                  popupRef.current?.close();
+                }}
                 className="text-[var(--muted)] hover:text-[var(--foreground)] text-lg leading-none"
               >
                 &times;
               </button>
             </div>
 
-            <div className="space-y-5 text-sm">
-              <div className="flex gap-3">
-                <span className="shrink-0 w-6 h-6 rounded-full bg-[#10a37f] text-white flex items-center justify-center text-xs font-bold">1</span>
-                <div>
-                  <p>Sign in with your ChatGPT account in the new tab.</p>
-                  <a
-                    href={authModal.authUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-block mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors"
+            {authModal.phase === "waiting" ? (
+              /* Phase 1: Waiting for popup login */
+              <div className="text-center py-4">
+                <div className="w-8 h-8 border-2 border-[#10a37f] border-t-transparent rounded-full animate-spin mx-auto" />
+                <p className="mt-4 text-sm">Waiting for ChatGPT login...</p>
+                <p className="mt-1 text-xs text-[var(--muted)]">Complete the sign-in in the popup window.</p>
+                <button
+                  onClick={() => {
+                    if (popupRef.current && !popupRef.current.closed) {
+                      popupRef.current.focus();
+                    } else {
+                      popupRef.current = window.open(authModal.authUrl, "chatgpt_auth", "width=500,height=700,left=200,top=100");
+                    }
+                  }}
+                  className="mt-4 text-xs text-[#10a37f] hover:underline"
+                >
+                  Reopen login popup
+                </button>
+              </div>
+            ) : (
+              /* Phase 2: Paste fallback */
+              <div className="space-y-3 text-sm">
+                <p className="text-[var(--muted)]">
+                  After logging in, the popup showed an error page.
+                  Copy the <strong className="text-[var(--foreground)]">full URL</strong> from that page&apos;s address bar and paste it here:
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={callbackUrl}
+                    onChange={(e) => setCallbackUrl(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && callbackUrl.trim()) handleLoginComplete(); }}
+                    // eslint-disable-next-line jsx-a11y/no-autofocus
+                    autoFocus
+                    placeholder="http://localhost:1455/auth/callback?code=..."
+                    className="flex-1 min-w-0 px-3 py-2.5 text-xs font-mono rounded-md border border-[var(--border)] bg-[var(--surface)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[#10a37f]/50"
+                  />
+                  <button
+                    onClick={handleLoginComplete}
+                    disabled={!callbackUrl.trim() || authLoading}
+                    className="px-4 py-2.5 text-xs font-medium rounded-md bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors disabled:opacity-40 shrink-0"
                   >
-                    Open Login Page &rarr;
-                  </a>
+                    {authLoading ? "..." : "Connect"}
+                  </button>
                 </div>
+                <button
+                  onClick={() => {
+                    popupRef.current = window.open(authModal.authUrl, "chatgpt_auth", "width=500,height=700,left=200,top=100");
+                    setAuthModal({ authUrl: authModal.authUrl, phase: "waiting" });
+                  }}
+                  className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+                >
+                  Try again
+                </button>
               </div>
-
-              <div className="flex gap-3">
-                <span className="shrink-0 w-6 h-6 rounded-full bg-[var(--foreground)] text-[var(--background)] flex items-center justify-center text-xs font-bold">2</span>
-                <div className="flex-1">
-                  <p className="mb-2">After logging in, you&apos;ll see an error page. <strong>Copy the full URL</strong> from the address bar and paste it below.</p>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={callbackUrl}
-                      onChange={(e) => setCallbackUrl(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter" && callbackUrl.trim()) handleLoginComplete(); }}
-                      // eslint-disable-next-line jsx-a11y/no-autofocus
-                      autoFocus
-                      placeholder="Paste URL here..."
-                      className="flex-1 px-3 py-2 text-xs font-mono rounded-md border border-[var(--border)] bg-[var(--surface)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[#10a37f]/50"
-                    />
-                    <button
-                      onClick={handleLoginComplete}
-                      disabled={!callbackUrl.trim() || authLoading}
-                      className="px-4 py-2 text-xs font-medium rounded-md bg-[#10a37f] hover:bg-[#0d8c6d] text-white transition-colors disabled:opacity-40 shrink-0"
-                    >
-                      {authLoading ? "..." : "Connect"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            )}
           </div>
         </div>
       )}
