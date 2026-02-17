@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, DM_Sans } from "next/font/google";
+import FirebaseAnalytics from "@/components/FirebaseAnalytics";
 import "./globals.css";
 
 const body = DM_Sans({
@@ -28,6 +29,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="scroll-smooth">
       <body className={`${body.variable} ${mono.variable} antialiased`}>
+        <FirebaseAnalytics />
         {children}
       </body>
     </html>
