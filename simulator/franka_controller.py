@@ -52,7 +52,7 @@ class FrankaController:
     GRIPPER_OPEN = 0.04
     GRIPPER_CLOSED = 0.001
     GRASP_APPROACH_HEIGHT = 0.08   # approach from above
-    KINEMATIC_SNAP_DIST = 0.03     # for kinematic attachment fallback
+    KINEMATIC_SNAP_DIST = 0.045    # for kinematic attachment fallback
 
     def __init__(self, env: MuJoCoEnv):
         self.env = env
@@ -213,7 +213,7 @@ class FrankaController:
         """Pick up a named object.
 
         Sequence: approach from above → descend → close gripper → lift.
-        Falls back to kinematic attachment if gripper contact fails.
+        Uses small offset retries and a staged vertical lift for stability.
         """
         approach_h = approach_height or self.GRASP_APPROACH_HEIGHT
 
@@ -221,43 +221,84 @@ class FrankaController:
         if obj_pos is None:
             return MotionResult(success=False, message=f"Object '{object_name}' not found")
 
-        # 1. Move to approach position (above object)
-        approach_pos = obj_pos.copy()
-        approach_pos[2] += approach_h
-        result = self.move_to(approach_pos)
-        if not result.success:
-            return result
-
-        # 2. Open gripper
+        # 1. Ensure open gripper before approach to avoid pushing/tipping objects.
         self.open_gripper()
 
-        # 3. Descend to grasp height
-        grasp_pos = obj_pos.copy()
-        grasp_pos[2] += 0.01  # slight offset above object center
-        result = self.move_to(grasp_pos, duration=1.0)
+        # 2. Retry grasp with slight lateral offsets to recover from unstable contacts.
+        grasp_offsets = [
+            np.array([0.0, 0.0, 0.0]),
+            np.array([0.0, 0.008, 0.0]),
+            np.array([0.0, -0.008, 0.0]),
+            np.array([0.008, 0.0, 0.0]),
+            np.array([-0.008, 0.0, 0.0]),
+        ]
+
+        attached = False
+        for attempt_i, offset in enumerate(grasp_offsets):
+            candidate = obj_pos + offset
+
+            approach_pos = candidate.copy()
+            approach_pos[2] += approach_h
+            result = self.move_to(approach_pos, duration=0.9 if attempt_i > 0 else 1.0)
+            if not result.success:
+                continue
+
+            grasp_pos = candidate.copy()
+            grasp_pos[2] += 0.012
+            result = self.move_to(grasp_pos, duration=1.1)
+            if not result.success:
+                continue
+
+            self.close_gripper(duration=0.7)
+            if self._try_kinematic_attach(object_name, snap_scale=1.0 if attempt_i == 0 else 1.25):
+                attached = True
+                break
+
+            # Re-open before trying a new approach.
+            self.open_gripper(duration=0.35)
+
+        if not attached:
+            return MotionResult(
+                success=False,
+                message=f"Failed to grasp '{object_name}' after {len(grasp_offsets)} attempts",
+            )
+
+        # 3. Controlled two-stage vertical lift to reduce wobble right after grasp.
+        ee_pos = self.get_ee_pos()
+        mid_lift = ee_pos.copy()
+        mid_lift[2] += max(0.04, approach_h * 0.55)
+        result = self.move_to(mid_lift, duration=0.9)
         if not result.success:
-            return result
+            self._attached_object = None
+            return MotionResult(
+                success=False,
+                message=f"Grasped '{object_name}' but mid-lift failed: {result.message}",
+            )
 
-        # 4. Close gripper
-        self.close_gripper()
+        final_lift = mid_lift.copy()
+        final_lift[2] += max(0.03, approach_h * 0.45)
+        result = self.move_to(final_lift, duration=1.0)
+        if not result.success:
+            self._attached_object = None
+            return MotionResult(
+                success=False,
+                message=f"Grasped '{object_name}' but final lift failed: {result.message}",
+            )
 
-        # 5. Kinematic attachment fallback
+        return MotionResult(success=True, message=f"Picked '{object_name}' with stabilized lift")
+
+    def _try_kinematic_attach(self, object_name: str, snap_scale: float = 1.0) -> bool:
+        """Attach when gripper/object distance is close enough."""
         ee_pos = self.get_ee_pos()
         current_obj_pos = self.env.get_object_pos(object_name)
-        if current_obj_pos is not None:
-            dist = np.linalg.norm(ee_pos - current_obj_pos)
-            if dist < self.KINEMATIC_SNAP_DIST:
-                self._attached_object = object_name
+        if current_obj_pos is None:
+            return False
 
-        # 6. Lift
-        lift_pos = ee_pos.copy()
-        lift_pos[2] += approach_h
-        result = self.move_to(lift_pos, duration=1.0)
-
-        return MotionResult(
-            success=True,
-            message=f"Picked '{object_name}' (attached={self._attached_object is not None})",
-        )
+        dist = np.linalg.norm(ee_pos - current_obj_pos)
+        if dist < self.KINEMATIC_SNAP_DIST * snap_scale:
+            self._attached_object = object_name
+            return True
+        return False
 
     def place(
         self,

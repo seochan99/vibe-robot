@@ -9,6 +9,7 @@ This is the mechanism used by OpenCode, OpenClaw, and similar tools.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Optional
 
@@ -16,6 +17,8 @@ import requests
 
 from providers.base import LLMProvider, LLMResponse
 from providers.chatgpt_auth import ChatGPTAuth
+
+logger = logging.getLogger(__name__)
 
 
 # ChatGPT backend API endpoint (same as Codex CLI uses)
@@ -150,25 +153,31 @@ class ChatGPTOAuthProvider(LLMProvider):
         # Build input messages
         input_messages = []
         if system_prompt:
-            input_messages.append({
-                "role": "developer",
-                "content": [{"type": "input_text", "text": system_prompt}],
-            })
+            input_messages.append(
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": system_prompt}],
+                }
+            )
 
         # Build user message content
         user_content = []
         if images:
             for img_b64 in images:
-                user_content.append({
-                    "type": "input_image",
-                    "image_url": f"data:image/png;base64,{img_b64}",
-                })
+                user_content.append(
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/png;base64,{img_b64}",
+                    }
+                )
         user_content.append({"type": "input_text", "text": prompt})
 
-        input_messages.append({
-            "role": "user",
-            "content": user_content,
-        })
+        input_messages.append(
+            {
+                "role": "user",
+                "content": user_content,
+            }
+        )
 
         # Build request body
         instructions = self._instructions
@@ -189,6 +198,7 @@ class ChatGPTOAuthProvider(LLMProvider):
         }
 
         # Make the API call
+        logger.info("ChatGPT OAuth request start model=%s", self._model)
         resp = requests.post(
             CODEX_API_URL,
             headers=headers,
@@ -196,9 +206,11 @@ class ChatGPTOAuthProvider(LLMProvider):
             stream=True,
             timeout=120,
         )
+        logger.info("ChatGPT OAuth response status=%s", resp.status_code)
 
         if resp.status_code == 401 and self._auth:
             # Token might be expired, try refreshing
+            logger.warning("ChatGPT OAuth got 401; attempting token refresh")
             self._auth._refresh_tokens()
             headers["Authorization"] = f"Bearer {self._auth.get_access_token()}"
             resp = requests.post(
@@ -208,8 +220,14 @@ class ChatGPTOAuthProvider(LLMProvider):
                 stream=True,
                 timeout=120,
             )
+            logger.info("ChatGPT OAuth retry status=%s", resp.status_code)
 
         if resp.status_code != 200:
+            logger.error(
+                "ChatGPT API error status=%s body=%s",
+                resp.status_code,
+                resp.text[:500],
+            )
             raise RuntimeError(
                 f"ChatGPT API error ({resp.status_code}): {resp.text[:500]}"
             )
@@ -237,10 +255,15 @@ class ChatGPTOAuthProvider(LLMProvider):
     def _parse_sse_response(self, resp: requests.Response) -> str:
         """Parse Server-Sent Events stream and extract text content."""
         text_parts = []
+        event_count = 0
 
         for line in resp.iter_lines(decode_unicode=True):
             if not line:
                 continue
+
+            # requests can still yield bytes when encoding is unknown.
+            if isinstance(line, bytes):
+                line = line.decode("utf-8", errors="ignore")
 
             # SSE format: "event: <type>\ndata: <json>"
             if line.startswith("data: "):
@@ -250,12 +273,18 @@ class ChatGPTOAuthProvider(LLMProvider):
 
                 try:
                     event_data = json.loads(data_str)
+                    event_count += 1
                     text = self._extract_text_from_event(event_data)
                     if text:
                         text_parts.append(text)
                 except json.JSONDecodeError:
                     continue
 
+        logger.info(
+            "ChatGPT OAuth SSE parsed events=%s chars=%s",
+            event_count,
+            len("".join(text_parts)),
+        )
         return "".join(text_parts)
 
     def _extract_text_from_event(self, event: dict) -> str:

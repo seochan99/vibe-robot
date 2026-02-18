@@ -8,7 +8,8 @@ Coordinates the full workflow:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Optional
 
@@ -26,6 +27,8 @@ from core.scene_understanding import SceneState, SceneUnderstanding
 from simulator.franka_controller import FrankaController, MotionResult
 from simulator.mujoco_env import MuJoCoEnv
 from simulator.scene_builder import SceneObject, get_scene_objects_info
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineStage(Enum):
@@ -94,6 +97,9 @@ class VibeRobotPipeline:
         command: str,
         conditions: list[str] = None,
         auto_approve: bool = False,
+        on_stage=None,
+        context_hint: str | None = None,
+        preferred_target: str | None = None,
     ) -> PipelineResult:
         """Run the full pipeline synchronously (for development/testing).
 
@@ -101,73 +107,126 @@ class VibeRobotPipeline:
             command: Natural language user command.
             conditions: Environmental conditions (e.g. ["wind_present"]).
             auto_approve: Skip user approval step (for automated testing).
+            on_stage: Optional callback(stage_name: str, message: str, result_so_far: PipelineResult).
         """
         result = PipelineResult(stage=PipelineStage.IDLE)
         result.timestamps["start"] = time.time()
 
+        def _notify(stage: str, msg: str):
+            if on_stage:
+                on_stage(stage, msg, result)
+
         try:
             # Stage 1: Intent Inference
             self._current_stage = PipelineStage.INTENT_INFERENCE
+            _notify("intent_inference", "Analyzing your command...")
             result.timestamps["intent_start"] = time.time()
-            scene_summary = self._get_scene_summary()
+            scene_summary = self._get_scene_summary(context_hint=context_hint)
             result.intent = self.intent_engine.infer_sync(command, scene_summary)
+            if preferred_target:
+                result.intent.target_objects = [preferred_target]
+                _notify("retry_context", f"Keeping target object: {preferred_target}")
             result.timestamps["intent_end"] = time.time()
+            _notify("intent_done", f"Intent: {result.intent.intended_meaning}")
 
             # Stage 2: Scene Understanding
             self._current_stage = PipelineStage.SCENE_UNDERSTANDING
+            _notify("scene_understanding", "Understanding the scene...")
             result.timestamps["scene_start"] = time.time()
             objects_info = get_scene_objects_info(self._scene_objects)
             result.scene = self.scene_engine.analyze_from_metadata(
-                objects_info, conditions=conditions,
+                objects_info,
+                conditions=conditions,
             )
             result.timestamps["scene_end"] = time.time()
+            _notify(
+                "scene_done", f"Scene: {len(result.scene.objects)} objects detected"
+            )
 
             # Stage 3: Affordance Analysis
             self._current_stage = PipelineStage.AFFORDANCE_ANALYSIS
+            _notify("affordance_analysis", "Analyzing object affordances...")
             result.timestamps["affordance_start"] = time.time()
-            result.affordance = self.affordance_engine.analyze(result.scene, result.intent)
+            result.affordance = self.affordance_engine.analyze(
+                result.scene, result.intent
+            )
             result.timestamps["affordance_end"] = time.time()
+            rec = result.affordance.recommended_object or "none"
+            _notify("affordance_done", f"Recommended: {rec}")
 
             # Stage 4: Plan Generation
             self._current_stage = PipelineStage.PLAN_GENERATION
+            _notify("plan_generation", "Generating execution plan...")
             result.timestamps["plan_start"] = time.time()
             result.plan = self.planner.generate_plan_sync(
-                result.scene, result.intent, result.affordance,
+                result.scene,
+                result.intent,
+                result.affordance,
+            )
+            result.plan = self._apply_retry_target_guardrail(
+                result.plan,
+                result.intent,
+                result.scene,
+                result.affordance,
+                preferred_target,
+                _notify,
             )
             result.timestamps["plan_end"] = time.time()
 
             if not result.plan.steps:
                 result.stage = PipelineStage.FAILED
                 result.error = f"Planning failed: {result.plan.plan_description}"
+                _notify("failed", result.error)
                 return result
+
+            steps_desc = ", ".join(f"{s.action}({s.target})" for s in result.plan.steps)
+            _notify("plan_done", f"Plan: {steps_desc}")
 
             # Stage 5: Safety Contract
             self._current_stage = PipelineStage.SAFETY_CONTRACT
+            _notify("safety_contract", "Generating safety constraints...")
             result.safety_contract = self.safety_gen.generate(result.plan)
+            _notify("safety_done", "Safety contract ready")
 
-            # Stage 6: Simulation Preview
+            # Stage 6: Simulation Preview (chat preview before approval)
             self._current_stage = PipelineStage.SIMULATION_PREVIEW
+            _notify(
+                "simulation_preview",
+                "Generating chat preview from simulation...",
+            )
             result.timestamps["sim_start"] = time.time()
-            preview_results = self._run_simulation_preview(result.plan, result.safety_contract)
+            preview_results = self._run_simulation_preview(
+                result.plan, result.safety_contract
+            )
             result.preview_frames = preview_results.get("frames", [])
             result.timestamps["sim_end"] = time.time()
+            _notify("preview_done", "Preview complete")
 
             # Check if simulation had safety violations
             if preview_results.get("violations"):
-                result.error = f"Safety violations in preview: {preview_results['violations']}"
+                result.error = (
+                    f"Safety violations in preview: {preview_results['violations']}"
+                )
                 result.stage = PipelineStage.FAILED
+                _notify("failed", result.error)
                 return result
 
-            # Stage 7: Awaiting Approval
+            # Stage 7: Awaiting Approval (real robot motion still pending)
             if not auto_approve:
                 self._current_stage = PipelineStage.AWAITING_APPROVAL
                 result.stage = PipelineStage.AWAITING_APPROVAL
+                _notify(
+                    "awaiting_approval",
+                    "Preview ready. Approve to run in live simulation.",
+                )
                 return result
 
             # Stage 8: Execute
             self._current_stage = PipelineStage.EXECUTING
             result.timestamps["exec_start"] = time.time()
-            result.execution_results = self._execute_plan(result.plan, result.safety_contract)
+            result.execution_results = self._execute_plan(
+                result.plan, result.safety_contract
+            )
             result.timestamps["exec_end"] = time.time()
 
             result.stage = PipelineStage.COMPLETED
@@ -176,6 +235,7 @@ class VibeRobotPipeline:
         except Exception as e:
             result.stage = PipelineStage.FAILED
             result.error = str(e)
+            _notify("failed", str(e))
 
         self._current_stage = result.stage
         self._result = result
@@ -187,6 +247,9 @@ class VibeRobotPipeline:
         provider=None,
         conditions: list[str] = None,
         auto_approve: bool = False,
+        on_stage=None,
+        context_hint: str | None = None,
+        preferred_target: str | None = None,
     ) -> PipelineResult:
         """Run the full pipeline using an LLM provider for intent/planning.
 
@@ -197,94 +260,200 @@ class VibeRobotPipeline:
             provider: LLMProvider instance for GPT calls.
             conditions: Environmental conditions.
             auto_approve: Skip user approval step.
+            on_stage: Optional callback(stage_name, message, result_so_far).
         """
         result = PipelineResult(stage=PipelineStage.IDLE)
         result.timestamps["start"] = time.time()
 
+        def _notify(stage: str, msg: str):
+            if on_stage:
+                on_stage(stage, msg, result)
+
         try:
             # Stage 1: Intent Inference (LLM)
             self._current_stage = PipelineStage.INTENT_INFERENCE
+            _notify("intent_inference", "Analyzing your command with GPT...")
             result.timestamps["intent_start"] = time.time()
-            scene_summary = self._get_scene_summary()
+            scene_summary = self._get_scene_summary(context_hint=context_hint)
 
             if provider:
                 try:
                     intent_engine = IntentInference(provider=provider)
                     result.intent = await intent_engine.infer(command, scene_summary)
-                except Exception:
-                    # Fallback to rule-based
-                    result.intent = self.intent_engine.infer_sync(command, scene_summary)
+                    if preferred_target:
+                        result.intent.target_objects = [preferred_target]
+                        _notify(
+                            "retry_context",
+                            f"Keeping target object: {preferred_target}",
+                        )
+                    _notify(
+                        "intent_done", f"GPT Intent: {result.intent.intended_meaning}"
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "LLM intent inference failed; falling back to rule-based"
+                    )
+                    _notify("intent_fallback", f"GPT failed ({e}), using rule-based...")
+                    result.intent = self.intent_engine.infer_sync(
+                        command, scene_summary
+                    )
+                    if preferred_target:
+                        result.intent.target_objects = [preferred_target]
+                        _notify(
+                            "retry_context",
+                            f"Keeping target object: {preferred_target}",
+                        )
+                    _notify("intent_done", f"Intent: {result.intent.intended_meaning}")
             else:
                 result.intent = self.intent_engine.infer_sync(command, scene_summary)
+                if preferred_target:
+                    result.intent.target_objects = [preferred_target]
+                    _notify(
+                        "retry_context",
+                        f"Keeping target object: {preferred_target}",
+                    )
+                _notify("intent_done", f"Intent: {result.intent.intended_meaning}")
             result.timestamps["intent_end"] = time.time()
 
             # Stage 2: Scene Understanding
             self._current_stage = PipelineStage.SCENE_UNDERSTANDING
+            _notify("scene_understanding", "Understanding the scene...")
             result.timestamps["scene_start"] = time.time()
             objects_info = get_scene_objects_info(self._scene_objects)
             result.scene = self.scene_engine.analyze_from_metadata(
-                objects_info, conditions=conditions,
+                objects_info,
+                conditions=conditions,
             )
             result.timestamps["scene_end"] = time.time()
+            _notify(
+                "scene_done", f"Scene: {len(result.scene.objects)} objects detected"
+            )
 
             # Stage 3: Affordance Analysis
             self._current_stage = PipelineStage.AFFORDANCE_ANALYSIS
+            _notify("affordance_analysis", "Analyzing object affordances...")
             result.timestamps["affordance_start"] = time.time()
-            result.affordance = self.affordance_engine.analyze(result.scene, result.intent)
+            result.affordance = self.affordance_engine.analyze(
+                result.scene, result.intent
+            )
             result.timestamps["affordance_end"] = time.time()
+            rec = result.affordance.recommended_object or "none"
+            _notify("affordance_done", f"Recommended: {rec}")
 
             # Stage 4: Plan Generation (LLM)
             self._current_stage = PipelineStage.PLAN_GENERATION
+            _notify("plan_generation", "Generating execution plan with GPT...")
             result.timestamps["plan_start"] = time.time()
 
             if provider:
                 try:
                     planner = Planner(provider=provider)
                     result.plan = await planner.generate_plan(
-                        result.scene, result.intent, result.affordance,
+                        result.scene,
+                        result.intent,
+                        result.affordance,
                     )
-                except Exception:
-                    # Fallback to rule-based
+                    result.plan = self._apply_retry_target_guardrail(
+                        result.plan,
+                        result.intent,
+                        result.scene,
+                        result.affordance,
+                        preferred_target,
+                        _notify,
+                    )
+                    _notify("plan_done", f"GPT Plan: {result.plan.plan_description}")
+                except Exception as e:
+                    logger.exception(
+                        "LLM plan generation failed; falling back to rule-based"
+                    )
+                    _notify("plan_fallback", f"GPT failed ({e}), using rule-based...")
                     result.plan = self.planner.generate_plan_sync(
-                        result.scene, result.intent, result.affordance,
+                        result.scene,
+                        result.intent,
+                        result.affordance,
                     )
+                    result.plan = self._apply_retry_target_guardrail(
+                        result.plan,
+                        result.intent,
+                        result.scene,
+                        result.affordance,
+                        preferred_target,
+                        _notify,
+                    )
+                    steps_desc = ", ".join(
+                        f"{s.action}({s.target})" for s in result.plan.steps
+                    )
+                    _notify("plan_done", f"Plan: {steps_desc}")
             else:
                 result.plan = self.planner.generate_plan_sync(
-                    result.scene, result.intent, result.affordance,
+                    result.scene,
+                    result.intent,
+                    result.affordance,
                 )
+                result.plan = self._apply_retry_target_guardrail(
+                    result.plan,
+                    result.intent,
+                    result.scene,
+                    result.affordance,
+                    preferred_target,
+                    _notify,
+                )
+                steps_desc = ", ".join(
+                    f"{s.action}({s.target})" for s in result.plan.steps
+                )
+                _notify("plan_done", f"Plan: {steps_desc}")
             result.timestamps["plan_end"] = time.time()
 
             if not result.plan.steps:
                 result.stage = PipelineStage.FAILED
                 result.error = f"Planning failed: {result.plan.plan_description}"
+                _notify("failed", result.error)
                 return result
 
             # Stage 5: Safety Contract
             self._current_stage = PipelineStage.SAFETY_CONTRACT
+            _notify("safety_contract", "Generating safety constraints...")
             result.safety_contract = self.safety_gen.generate(result.plan)
+            _notify("safety_done", "Safety contract ready")
 
-            # Stage 6: Simulation Preview
+            # Stage 6: Simulation Preview (chat preview before approval)
             self._current_stage = PipelineStage.SIMULATION_PREVIEW
+            _notify(
+                "simulation_preview",
+                "Generating chat preview from simulation...",
+            )
             result.timestamps["sim_start"] = time.time()
-            preview_results = self._run_simulation_preview(result.plan, result.safety_contract)
+            preview_results = self._run_simulation_preview(
+                result.plan, result.safety_contract
+            )
             result.preview_frames = preview_results.get("frames", [])
             result.timestamps["sim_end"] = time.time()
+            _notify("preview_done", "Preview complete")
 
             if preview_results.get("violations"):
-                result.error = f"Safety violations in preview: {preview_results['violations']}"
+                result.error = (
+                    f"Safety violations in preview: {preview_results['violations']}"
+                )
                 result.stage = PipelineStage.FAILED
+                _notify("failed", result.error)
                 return result
 
-            # Stage 7: Awaiting Approval
+            # Stage 7: Awaiting Approval (real robot motion still pending)
             if not auto_approve:
                 self._current_stage = PipelineStage.AWAITING_APPROVAL
                 result.stage = PipelineStage.AWAITING_APPROVAL
+                _notify(
+                    "awaiting_approval",
+                    "Preview ready. Approve to run in live simulation.",
+                )
                 return result
 
             # Stage 8: Execute
             self._current_stage = PipelineStage.EXECUTING
             result.timestamps["exec_start"] = time.time()
-            result.execution_results = self._execute_plan(result.plan, result.safety_contract)
+            result.execution_results = self._execute_plan(
+                result.plan, result.safety_contract
+            )
             result.timestamps["exec_end"] = time.time()
 
             result.stage = PipelineStage.COMPLETED
@@ -309,7 +478,9 @@ class VibeRobotPipeline:
 
         self._current_stage = PipelineStage.EXECUTING
         result.timestamps["exec_start"] = time.time()
-        result.execution_results = self._execute_plan(result.plan, result.safety_contract)
+        result.execution_results = self._execute_plan(
+            result.plan, result.safety_contract
+        )
         self.controller.realtime = False
         result.timestamps["exec_end"] = time.time()
         result.stage = PipelineStage.COMPLETED
@@ -324,51 +495,56 @@ class VibeRobotPipeline:
         plan: ExecutionPlan,
         contract: SafetyContract,
     ) -> dict:
-        """Run the plan in simulation for preview. Runs in real-time for MJPEG viewing."""
-        # Save current state
-        saved_qpos = self.env.data.qpos.copy()
-        saved_qvel = self.env.data.qvel.copy()
+        """Run a preview used in chat without animating the live simulation panel."""
+        # Hold env lock for entire preview so live MJPEG stream stays frozen pre-approval.
+        with self.env._lock:
+            # Save current state
+            saved_qpos = self.env.data.qpos.copy()
+            saved_qvel = self.env.data.qvel.copy()
+            prev_realtime = self.controller.realtime
 
-        monitor = SafetyMonitor(contract)
-        frames = []
-        violations = []
+            monitor = SafetyMonitor(contract)
+            frames = []
+            violations = []
 
-        # Enable real-time so MJPEG stream shows the preview
-        self.controller.realtime = True
-
-        try:
-            # Reset to home
-            self.env.reset()
-
-            # Enable frame capture for animated preview
-            self.env.enable_frame_capture(every_n=8, width=480, height=360)
-
-            # Execute plan steps in simulation
-            for step in plan.steps:
-                motion_result = self._execute_step(step, record=True)
-
-                # Check safety invariants
-                state = self.env.get_state()
-                check = monitor.check_invariants(state.ee_pos)
-                if not check.passed:
-                    violations.extend(check.violated_conditions)
-                    if check.severity == "emergency_stop":
-                        break
-
-            # Collect all captured frames
-            frames = self.env.disable_frame_capture()
-
-            # Always add a final frame
-            try:
-                frames.append(self.env.render_offscreen(480, 360))
-            except Exception:
-                pass
-
-        finally:
+            # Preview should be fast and invisible to the live simulation panel.
             self.controller.realtime = False
-            # Restore state
-            self.env.data.qpos[:] = saved_qpos
-            self.env.data.qvel[:] = saved_qvel
+
+            try:
+                # Reset to home
+                self.env.reset()
+
+                # Enable frame capture for animated preview
+                self.env.enable_frame_capture(every_n=8, width=480, height=360)
+
+                # Execute plan steps in simulation
+                for step in plan.steps:
+                    self._execute_step(step, record=True)
+
+                    # Check safety invariants
+                    state = self.env.get_state()
+                    check = monitor.check_invariants(state.ee_pos)
+                    if not check.passed:
+                        violations.extend(check.violated_conditions)
+                        if check.severity == "emergency_stop":
+                            break
+
+                # Collect all captured frames
+                frames = self.env.disable_frame_capture()
+
+                # Always add a final frame
+                try:
+                    frames.append(self.env.render_offscreen(480, 360))
+                except Exception:
+                    pass
+
+            finally:
+                # Ensure capture mode is off even if something fails mid-preview.
+                self.env.disable_frame_capture()
+                self.controller.realtime = prev_realtime
+                # Restore state before releasing lock
+                self.env.reset(qpos=saved_qpos)
+                self.env.data.qvel[:] = saved_qvel
 
         return {
             "frames": frames,
@@ -388,25 +564,29 @@ class VibeRobotPipeline:
 
         for i, step in enumerate(plan.steps):
             motion_result = self._execute_step(step, record=True)
-            results.append({
-                "step": i,
-                "action": step.action,
-                "target": step.target,
-                "success": motion_result.success,
-                "message": motion_result.message,
-            })
+            results.append(
+                {
+                    "step": i,
+                    "action": step.action,
+                    "target": step.target,
+                    "success": motion_result.success,
+                    "message": motion_result.message,
+                }
+            )
 
             # Check safety
             state = self.env.get_state()
             check = monitor.check_invariants(state.ee_pos)
             if check.severity == "emergency_stop":
-                results.append({
-                    "step": i,
-                    "action": "EMERGENCY_STOP",
-                    "target": "",
-                    "success": False,
-                    "message": f"Emergency stop: {check.violated_conditions}",
-                })
+                results.append(
+                    {
+                        "step": i,
+                        "action": "EMERGENCY_STOP",
+                        "target": "",
+                        "success": False,
+                        "message": f"Emergency stop: {check.violated_conditions}",
+                    }
+                )
                 break
 
         return results
@@ -444,10 +624,13 @@ class VibeRobotPipeline:
         else:
             return MotionResult(False, f"Unknown action: {step.action}")
 
-    def _get_scene_summary(self) -> str:
+    def _get_scene_summary(self, context_hint: str | None = None) -> str:
         """Get a rich scene summary for LLM context."""
         if not self._scene_objects:
-            return "Empty scene with Franka Panda robot arm on desk"
+            base = "Empty scene with Franka Panda robot arm on desk"
+            if context_hint:
+                return f"{base}\n\nRetry context:\n{context_hint}"
+            return base
 
         lines = ["Franka Panda robot arm on a desk. Objects in scene:"]
         for obj in self._scene_objects:
@@ -474,4 +657,79 @@ class VibeRobotPipeline:
                 f"pos=({obj.pos[0]:.2f}, {obj.pos[1]:.2f}, {obj.pos[2]:.2f}), "
                 f"mass={obj.mass}kg{prop_str}"
             )
+        if context_hint:
+            lines.append("")
+            lines.append("Retry context:")
+            lines.append(context_hint)
         return "\n".join(lines)
+
+    def _apply_retry_target_guardrail(
+        self,
+        plan: ExecutionPlan,
+        intent: UserIntent,
+        scene: SceneState,
+        affordance: AffordanceAnalysis,
+        preferred_target: str | None,
+        notify=None,
+    ) -> ExecutionPlan:
+        """Force retry runs to stay on the same target object when requested."""
+        if not preferred_target:
+            return plan
+
+        preferred_lower = preferred_target.lower()
+
+        def _matches(target: str) -> bool:
+            if not target:
+                return False
+            target_lower = str(target).lower()
+            if target_lower == preferred_lower:
+                return True
+            return target_lower.split("_")[0] == preferred_lower.split("_")[0]
+
+        for step in plan.steps:
+            if _matches(step.target):
+                return plan
+            if _matches(step.params.get("on", "")):
+                return plan
+
+        if notify:
+            notify(
+                "plan_guardrail",
+                f"Retry guardrail applied: forcing target to {preferred_target}",
+            )
+
+        patched_intent = replace(
+            intent,
+            target_objects=[preferred_target],
+            immediate_goal=(
+                intent.immediate_goal
+                if intent.immediate_goal.lower() in ("pick", "hold", "move", "relocate")
+                else "pick"
+            ),
+        )
+        patched_plan = self.planner.generate_plan_sync(scene, patched_intent, affordance)
+
+        for step in patched_plan.steps:
+            if _matches(step.target) or _matches(step.params.get("on", "")):
+                return patched_plan
+
+        # Hard fallback: directly pick and stabilize the requested target.
+        return ExecutionPlan(
+            steps=[
+                PlanStep(
+                    action="pick",
+                    target=preferred_target,
+                    description=f"Pick up {preferred_target}",
+                ),
+                PlanStep(
+                    action="wait",
+                    target=preferred_target,
+                    params={"duration": 2.0},
+                    description=f"Hold {preferred_target} steady for stability check",
+                ),
+            ],
+            plan_description=f"Re-grasp and stabilize {preferred_target}",
+            estimated_duration=6.0,
+            risk_level="low",
+            reasoning="Retry guardrail fallback to keep the previous target object.",
+        )

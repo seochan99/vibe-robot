@@ -31,13 +31,34 @@ class LLMResponse:
         # Handle markdown code blocks
         if text.startswith("```"):
             lines = text.split("\n")
-            text = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
-        # Find JSON object
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            self.json_data = json.loads(text[start:end])
-            return self.json_data
+            text = (
+                "\n".join(lines[1:-1])
+                if lines[-1].strip() == "```"
+                else "\n".join(lines[1:])
+            )
+
+        # Fast path when the entire payload is valid JSON.
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                self.json_data = parsed
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        # Robust fallback: decode the first valid JSON object in mixed text.
+        decoder = json.JSONDecoder()
+        for i, ch in enumerate(text):
+            if ch != "{":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(text[i:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                self.json_data = parsed
+                return parsed
+
         raise ValueError(f"Could not parse JSON from response: {text[:200]}")
 
 

@@ -11,7 +11,7 @@ import type {
 import {
   approveExecution,
   fetchModels,
-  sendCommand,
+  sendCommandStream,
   initScene,
   fetchSceneObjects,
   addSceneObject,
@@ -63,6 +63,13 @@ const SCENES = [
 
 function msgId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s}s`;
 }
 
 /** One-line summary shown above the preview */
@@ -194,10 +201,14 @@ export default function AppPage() {
   const [simConnected, setSimConnected] = useState(false);
   const [editorMode, setEditorMode] = useState<string | null>(null); // object type being placed
   const [pipelineStage, setPipelineStage] = useState<string>("idle");
+  const [requestStartedAt, setRequestStartedAt] = useState<number | null>(null);
+  const [lastStreamAt, setLastStreamAt] = useState<number | null>(null);
+  const [clockMs, setClockMs] = useState<number>(Date.now());
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const simImgRef = useRef<HTMLImageElement>(null);
+  const streamUiTickRef = useRef(0);
 
   // Check auth (client-side) + fetch models on mount
   useEffect(() => {
@@ -240,6 +251,13 @@ export default function AppPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Live timer while command is running
+  useEffect(() => {
+    if (!loading) return;
+    const id = window.setInterval(() => setClockMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [loading]);
+
   // Welcome message
   useEffect(() => {
     setMessages([
@@ -262,6 +280,24 @@ export default function AppPage() {
     setMessages((prev) => [...prev, { ...msg, id: msgId(), timestamp: Date.now() }]);
   }, []);
 
+  // Update the last assistant message in-place (for streaming updates)
+  const updateLastAssistant = useCallback((updater: (msg: ChatMessage) => ChatMessage) => {
+    setMessages((prev) => {
+      const idx = prev.length - 1;
+      if (idx < 0 || prev[idx].role !== "assistant") return prev;
+      const updated = [...prev];
+      updated[idx] = updater(updated[idx]);
+      return updated;
+    });
+  }, []);
+
+  const markStreamActivity = useCallback(() => {
+    const now = Date.now();
+    if (now - streamUiTickRef.current < 700) return;
+    streamUiTickRef.current = now;
+    setLastStreamAt(now);
+  }, []);
+
   // Listen for auth changes from popup callback page (storage event)
   useEffect(() => {
     const handler = (e: StorageEvent) => {
@@ -280,7 +316,7 @@ export default function AppPage() {
     return () => window.removeEventListener("storage", handler);
   }, [addMessage]);
 
-  // Send command
+  // Send command (with SSE streaming for progressive updates)
   const handleSend = useCallback(async () => {
     const cmd = input.trim();
     if (!cmd || loading) return;
@@ -290,6 +326,13 @@ export default function AppPage() {
     setLoading(true);
     setAwaitingApproval(false);
     setPipelineStage("intent_inference");
+    const startedAt = Date.now();
+    setRequestStartedAt(startedAt);
+    setLastStreamAt(startedAt);
+    streamUiTickRef.current = startedAt;
+
+    // Add a placeholder assistant message that we'll update progressively
+    addMessage({ role: "assistant", content: "Starting pipeline...\nRequest sent to backend." });
 
     try {
       // Load tokens for GPT models
@@ -306,26 +349,50 @@ export default function AppPage() {
         }
       }
 
-      const res = await sendCommand(cmd, scene, model, accessToken, accountId);
+      // Use SSE streaming to get progressive updates
+      const res = await sendCommandStream(
+        cmd, scene, model,
+        (evt) => {
+          markStreamActivity();
+          if (evt.stage !== "heartbeat") {
+            // Update the placeholder message with each stage
+            setPipelineStage(evt.stage);
+            updateLastAssistant((msg) => ({
+              ...msg,
+              content: msg.content + "\n" + evt.message,
+            }));
+          }
+        },
+        accessToken,
+        accountId,
+        {
+          timeoutMs: 180_000,
+          onActivity: markStreamActivity,
+        },
+      );
+
+      // Replace the streaming message with the final result
       setPipelineStage(res.stage);
-      addMessage({
-        role: "assistant",
+      updateLastAssistant((msg) => ({
+        ...msg,
         content: formatSummary(res),
         pipeline: res,
         previewImage: res.preview_image,
         previewFormat: res.preview_format,
-      });
+      }));
       setAwaitingApproval(res.stage === "awaiting_approval");
     } catch (err) {
-      addMessage({
-        role: "assistant",
+      updateLastAssistant((msg) => ({
+        ...msg,
         content: `**Error:** ${err instanceof Error ? err.message : "Something went wrong"}.\n\nMake sure the backend is running: \`python api/server.py\``,
-      });
+      }));
     } finally {
       setLoading(false);
       setPipelineStage("idle");
+      setRequestStartedAt(null);
+      setLastStreamAt(null);
     }
-  }, [input, loading, scene, model, addMessage]);
+  }, [input, loading, scene, model, addMessage, updateLastAssistant, markStreamActivity]);
 
   // Approve
   const handleApprove = useCallback(async () => {
@@ -415,7 +482,7 @@ export default function AppPage() {
       // Map pixel coords to approximate workspace coords
       // Camera is ~120 azimuth, -20 elevation, centered ~(0.3, 0, 0.4)
       const x = 0.2 + nx * 0.6; // x: 0.2..0.8
-      const y = (0.5 - nx) * 0.6; // rough y mapping
+      const y = (0.5 - ny) * 0.6; // rough y mapping
       const z = 0.35; // desk surface height
 
       try {
@@ -473,9 +540,9 @@ export default function AppPage() {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onresult = (event: any) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const transcript = Array.from(event.results as any[])
-        .map((r: any) => r[0].transcript)
+      type SpeechResult = { 0?: { transcript?: string } };
+      const transcript = Array.from(event.results as ArrayLike<SpeechResult>)
+        .map((r) => r[0]?.transcript || "")
         .join("");
       setInput(transcript);
     };
@@ -488,6 +555,15 @@ export default function AppPage() {
   }, [isListening]);
 
   const selectedScene = SCENES.find((s) => s.id === scene)!;
+  const elapsedSec =
+    loading && requestStartedAt
+      ? Math.max(0, Math.floor((clockMs - requestStartedAt) / 1000))
+      : 0;
+  const sinceUpdateSec =
+    loading && lastStreamAt
+      ? Math.max(0, Math.floor((clockMs - lastStreamAt) / 1000))
+      : 0;
+  const stageLabel = pipelineStage === "idle" ? "starting" : pipelineStage.replace(/_/g, " ");
 
   return (
     <div className="flex flex-col h-screen bg-[var(--background)] text-[var(--foreground)]">
@@ -760,6 +836,11 @@ export default function AppPage() {
                   for full AI-powered analysis.
                 </p>
               )}
+              {loading && (
+                <p className={`mt-2 text-xs text-center ${sinceUpdateSec > 8 ? "text-amber-500" : "text-[var(--muted)]"}`}>
+                  Running: {stageLabel} · elapsed {formatElapsed(elapsedSec)} · last update {formatElapsed(sinceUpdateSec)} ago
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -782,13 +863,20 @@ export default function AppPage() {
           {/* MJPEG stream */}
           <div className="relative flex-1 min-h-0 bg-black flex items-center justify-center">
             {simConnected ? (
-              <img
-                ref={simImgRef}
-                src={getSimStreamUrl()}
-                alt="MuJoCo simulation"
-                className={`w-full h-full object-contain ${editorMode ? "cursor-crosshair" : ""}`}
-                onClick={handleSimClick}
-              />
+              <>
+                <img
+                  ref={simImgRef}
+                  src={getSimStreamUrl()}
+                  alt="MuJoCo simulation"
+                  className={`w-full h-full object-contain ${editorMode && !loading ? "cursor-crosshair" : ""}`}
+                  onClick={loading ? undefined : handleSimClick}
+                />
+                {loading && (
+                  <div className="absolute bottom-3 left-3 right-3 rounded-lg border border-white/20 bg-black/60 backdrop-blur-sm px-3 py-2 text-xs text-white/90">
+                    Live simulation view · planning/safety checks in progress ({stageLabel})
+                  </div>
+                )}
+              </>
             ) : (
               <div className="text-center text-[var(--muted)] text-sm p-8">
                 <p className="font-medium mb-2">Simulation offline</p>

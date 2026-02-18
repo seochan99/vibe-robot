@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import logging
 import sys
 import time
 from pathlib import Path
@@ -25,9 +26,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.pipeline import PipelineResult, PipelineStage, VibeRobotPipeline
 from simulator.franka_controller import FrankaController
 from simulator.mujoco_env import MuJoCoEnv
-from simulator.scene_builder import TASK_PRESETS, SceneObject, build_scene_xml, get_scene_objects_info
+from simulator.scene_builder import (
+    TASK_PRESETS,
+    SceneObject,
+    build_scene_xml,
+    get_scene_objects_info,
+)
 from study.logger import InteractionLogger
 from ui.failure_cards import FailureCardGenerator
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="VibeRobot! API", version="0.1.0")
 
@@ -47,16 +59,21 @@ app.add_middleware(
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
+
 class AppState:
     def __init__(self):
         self.pipeline: Optional[VibeRobotPipeline] = None
         self.current_result: Optional[PipelineResult] = None
         self.scene_name: str = ""
+        self.last_target_object: Optional[str] = None
+        self.retry_count: int = 0
         self.logger = InteractionLogger()
         self.failure_gen = FailureCardGenerator()
 
     def init_pipeline(self, scene_name: str):
         self.scene_name = scene_name
+        self.last_target_object = None
+        self.retry_count = 0
         objects = TASK_PRESETS.get(scene_name, TASK_PRESETS["wind_paper"])
         xml = build_scene_xml(objects, include_wind="wind" in scene_name)
         env = MuJoCoEnv(xml_string=xml)
@@ -70,6 +87,7 @@ state = AppState()
 
 # ── Request / Response models ────────────────────────────────────────────────
 
+
 class CommandRequest(BaseModel):
     command: str
     scene: str = "wind_paper"
@@ -78,7 +96,104 @@ class CommandRequest(BaseModel):
     account_id: Optional[str] = None
 
 
+_RETRY_WORDS = (
+    "다시",
+    "또",
+    "지금도",
+    "여전히",
+    "아니",
+    "실패",
+    "넘어",
+    "떨어",
+    "제대로",
+    "안돼",
+    "고쳐",
+    "개선",
+    "retry",
+    "again",
+    "still",
+    "failed",
+    "fix",
+    "improve",
+    "re-grasp",
+)
+
+_OBJECT_HINTS = {
+    "사과": "apple",
+    "바나나": "banana",
+    "오렌지": "orange",
+    "컵": "cup",
+    "책": "book",
+    "종이": "paper",
+    "펜": "pen",
+    "큐브": "cube",
+}
+
+
+def _is_retry_feedback(command: str) -> bool:
+    cmd = command.lower()
+    return any(word in cmd for word in _RETRY_WORDS)
+
+
+def _command_mentions_object(command: str, scene_objects: list[SceneObject]) -> bool:
+    cmd = command.lower()
+
+    # Explicit Korean/English object mentions
+    for ko, en in _OBJECT_HINTS.items():
+        if ko in cmd or en in cmd:
+            return True
+
+    # Scene object names or base names (e.g. banana_01 -> banana)
+    for obj in scene_objects:
+        name = obj.name.lower()
+        if name in cmd:
+            return True
+        base = name.split("_")[0]
+        if base and base in cmd:
+            return True
+        obj_type = obj.obj_type.lower()
+        if obj_type in cmd:
+            return True
+
+    return False
+
+
+def _build_context_hint(
+    command: str,
+    scene_objects: list[SceneObject],
+    last_target_object: Optional[str],
+    retry_count: int = 0,
+) -> Optional[str]:
+    """Create retry context so follow-up commands keep the same target object."""
+    if not last_target_object:
+        return None
+    if _command_mentions_object(command, scene_objects):
+        return None
+    if not _is_retry_feedback(command):
+        return None
+
+    return (
+        f'Previous attempt target object: "{last_target_object}". '
+        f"Retry attempt count on this target: {max(1, retry_count + 1)}. "
+        "User is asking for a retry/improvement on the same target. "
+        "Keep this same target unless the user explicitly names a different object. "
+        "Prioritize stable grasp (no tipping), vertical top-down approach, and "
+        "controlled two-stage vertical lift with hold verification."
+    )
+
+
+def _infer_primary_target(result: PipelineResult) -> Optional[str]:
+    if not result.plan:
+        return None
+    for step in result.plan.steps:
+        target = (step.target or "").strip()
+        if target and target != "held_object":
+            return target
+    return None
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
+
 
 @app.get("/api/health")
 def health():
@@ -87,18 +202,28 @@ def health():
 
 @app.post("/api/command")
 async def run_command(req: CommandRequest):
-    """Run the pipeline for a user command."""
+    """Run the pipeline for a user command (non-streaming fallback)."""
+    logger.info("/api/command scene=%s model=%s", req.scene, req.model)
     if state.pipeline is None or state.scene_name != req.scene:
         state.init_pipeline(req.scene)
 
     state.logger.log_command(req.command)
     conditions = ["wind_present"] if "wind" in req.scene else []
+    context_hint = _build_context_hint(
+        req.command,
+        state.pipeline._scene_objects if state.pipeline else [],
+        state.last_target_object,
+        state.retry_count,
+    )
+    preferred_target = state.last_target_object if context_hint else None
+    if context_hint:
+        logger.info("Applying retry context for target=%s", state.last_target_object)
 
     loop = asyncio.get_event_loop()
 
-    # If a real model is selected and we have a token, use async GPT pipeline
     if req.model != "rule_based" and req.access_token:
         from providers.chatgpt_provider import ChatGPTOAuthProvider
+
         provider = ChatGPTOAuthProvider(
             access_token=req.access_token,
             account_id=req.account_id or "",
@@ -111,18 +236,164 @@ async def run_command(req: CommandRequest):
                 provider=provider,
                 conditions=conditions,
                 auto_approve=False,
+                context_hint=context_hint,
+                preferred_target=preferred_target,
             )
 
         result = await loop.run_in_executor(None, lambda: asyncio.run(_run_async()))
     else:
-        # Run in executor so MJPEG stream keeps rendering during preview
         result = await loop.run_in_executor(
             None,
-            lambda: state.pipeline.run_sync(req.command, conditions=conditions, auto_approve=False),
+            lambda: state.pipeline.run_sync(
+                req.command,
+                conditions=conditions,
+                auto_approve=False,
+                context_hint=context_hint,
+                preferred_target=preferred_target,
+            ),
         )
 
     state.current_result = result
+    prev_target = state.last_target_object
+    target = _infer_primary_target(result)
+    if target:
+        state.last_target_object = target
+        if prev_target != target:
+            state.retry_count = 0
+    logger.info("/api/command done stage=%s error=%s", result.stage.value, result.error)
     return _serialize_result(result)
+
+
+@app.post("/api/command/stream")
+async def run_command_stream(req: CommandRequest):
+    """Run the pipeline with SSE streaming — emits stage updates as they happen."""
+    import json as _json
+    import queue
+
+    logger.info("/api/command/stream start scene=%s model=%s", req.scene, req.model)
+    if state.pipeline is None or state.scene_name != req.scene:
+        state.init_pipeline(req.scene)
+
+    state.logger.log_command(req.command)
+    conditions = ["wind_present"] if "wind" in req.scene else []
+    context_hint = _build_context_hint(
+        req.command,
+        state.pipeline._scene_objects if state.pipeline else [],
+        state.last_target_object,
+        state.retry_count,
+    )
+    preferred_target = state.last_target_object if context_hint else None
+    if context_hint:
+        logger.info("Applying retry context for target=%s", state.last_target_object)
+
+    stage_queue: queue.Queue = queue.Queue()
+
+    def on_stage(stage: str, message: str, _result):
+        stage_queue.put({"stage": stage, "message": message})
+
+    loop = asyncio.get_event_loop()
+
+    # Start pipeline in a thread
+    import concurrent.futures
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    if req.model != "rule_based" and req.access_token:
+        from providers.chatgpt_provider import ChatGPTOAuthProvider
+
+        provider = ChatGPTOAuthProvider(
+            access_token=req.access_token,
+            account_id=req.account_id or "",
+            model=req.model,
+        )
+
+        async def _run_async():
+            return await state.pipeline.run_async(
+                req.command,
+                provider=provider,
+                conditions=conditions,
+                auto_approve=False,
+                on_stage=on_stage,
+                context_hint=context_hint,
+                preferred_target=preferred_target,
+            )
+
+        future = executor.submit(lambda: asyncio.run(_run_async()))
+    else:
+        future = executor.submit(
+            state.pipeline.run_sync,
+            req.command,
+            conditions,
+            False,
+            on_stage,
+            context_hint,
+            preferred_target,
+        )
+
+    async def event_stream():
+        last_emit = time.monotonic()
+        heartbeat_every_s = 2.0
+
+        try:
+            # Yield stage events while pipeline runs
+            while not future.done():
+                emitted = False
+
+                # Drain all available stage events
+                while not stage_queue.empty():
+                    try:
+                        evt = stage_queue.get_nowait()
+                        yield f"event: stage\ndata: {_json.dumps(evt)}\n\n"
+                        emitted = True
+                    except queue.Empty:
+                        break
+
+                now = time.monotonic()
+                if emitted:
+                    last_emit = now
+                elif now - last_emit >= heartbeat_every_s:
+                    hb = {"stage": "heartbeat", "message": "Still running..."}
+                    yield f"event: heartbeat\ndata: {_json.dumps(hb)}\n\n"
+                    last_emit = now
+
+                await asyncio.sleep(0.05)
+
+            # Drain remaining events
+            while not stage_queue.empty():
+                try:
+                    evt = stage_queue.get_nowait()
+                    yield f"event: stage\ndata: {_json.dumps(evt)}\n\n"
+                except queue.Empty:
+                    break
+
+            # Get final result
+            try:
+                result = future.result()
+                state.current_result = result
+                prev_target = state.last_target_object
+                target = _infer_primary_target(result)
+                if target:
+                    state.last_target_object = target
+                    if prev_target != target:
+                        state.retry_count = 0
+                serialized = _serialize_result(result)
+                logger.info(
+                    "/api/command/stream done stage=%s error=%s",
+                    result.stage.value,
+                    result.error,
+                )
+                yield f"event: result\ndata: {_json.dumps(serialized)}\n\n"
+            except Exception as e:
+                logger.exception("/api/command/stream failed")
+                yield f"event: error\ndata: {_json.dumps({'error': str(e)})}\n\n"
+        finally:
+            executor.shutdown(wait=False, cancel_futures=False)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/approve")
@@ -141,6 +412,7 @@ async def approve_execution():
         state.current_result,
     )
     state.current_result = result
+    state.retry_count = 0
     state.logger.log_execution_result(result.execution_results)
 
     return {
@@ -154,6 +426,13 @@ async def approve_execution():
 def reject_execution():
     """Reject the current plan."""
     state.logger.log_approval(approved=False)
+    if state.current_result:
+        target = _infer_primary_target(state.current_result)
+        if target:
+            if state.last_target_object != target:
+                state.retry_count = 0
+            state.last_target_object = target
+        state.retry_count += 1
     state.current_result = None
     return {"status": "rejected"}
 
@@ -161,12 +440,7 @@ def reject_execution():
 @app.get("/api/scenes")
 def list_scenes():
     """List available scenes."""
-    return {
-        "scenes": [
-            {"id": k, "objects": len(v)}
-            for k, v in TASK_PRESETS.items()
-        ]
-    }
+    return {"scenes": [{"id": k, "objects": len(v)} for k, v in TASK_PRESETS.items()]}
 
 
 @app.get("/api/models")
@@ -186,11 +460,13 @@ def list_models():
 
 # ── Session routes (renamed from /auth/* to avoid ad-blocker detection) ──────
 
+
 @app.get("/api/session/status")
 def session_status():
     """Check ChatGPT OAuth status."""
     try:
         from providers.chatgpt_auth import ChatGPTAuth
+
         auth = ChatGPTAuth()
         return auth.status
     except Exception:
@@ -202,6 +478,7 @@ def session_connect():
     """Trigger browser OAuth login."""
     try:
         from providers.chatgpt_auth import ChatGPTAuth
+
         auth = ChatGPTAuth()
         tokens = auth.login(headless=False)
         return {
@@ -218,6 +495,7 @@ def session_disconnect():
     """Remove stored credentials."""
     try:
         from providers.chatgpt_auth import ChatGPTAuth
+
         ChatGPTAuth().logout()
         return {"status": "logged_out"}
     except Exception:
@@ -226,17 +504,21 @@ def session_disconnect():
 
 # ── Scene management models ──────────────────────────────────────────────────
 
+
 class SceneInitRequest(BaseModel):
     scene: str = "wind_paper"
+
 
 class AddObjectRequest(BaseModel):
     obj_type: str  # "book", "cup", "pen", "paper", "apple", "banana", "orange", "cube"
     position: list[float] = [0.5, 0.0, 0.35]
     name: Optional[str] = None
 
+
 class MoveObjectRequest(BaseModel):
     name: str
     position: list[float]
+
 
 class RemoveObjectRequest(BaseModel):
     name: str
@@ -246,14 +528,63 @@ class RemoveObjectRequest(BaseModel):
 
 # Predefined object templates for the palette
 _OBJECT_TEMPLATES: dict[str, dict] = {
-    "book": {"obj_type": "box", "size": (0.08, 0.06, 0.015), "rgba": (0.2, 0.3, 0.7, 1.0), "mass": 0.5, "properties": {"graspable": True, "heavy": True, "weight_kg": 0.5}},
-    "cup": {"obj_type": "cylinder", "size": (0.03, 0.05), "rgba": (0.9, 0.85, 0.8, 1.0), "mass": 0.2, "properties": {"graspable": True, "container": True}},
-    "pen": {"obj_type": "cylinder", "size": (0.005, 0.07), "rgba": (0.1, 0.1, 0.1, 1.0), "mass": 0.01, "properties": {"graspable": True, "thin": True}},
-    "paper": {"obj_type": "box", "size": (0.1, 0.07, 0.001), "rgba": (1.0, 1.0, 0.95, 1.0), "mass": 0.005, "friction": (0.3, 0.001, 0.0001), "properties": {"graspable": True, "loose": True, "fragile": True}},
-    "apple": {"obj_type": "sphere", "size": (0.03,), "rgba": (0.9, 0.15, 0.1, 1.0), "mass": 0.15, "properties": {"graspable": True, "fruit": True}},
-    "banana": {"obj_type": "cylinder", "size": (0.015, 0.06), "rgba": (1.0, 0.9, 0.2, 1.0), "mass": 0.12, "properties": {"graspable": True, "fruit": True}},
-    "orange": {"obj_type": "sphere", "size": (0.035,), "rgba": (1.0, 0.6, 0.0, 1.0), "mass": 0.2, "properties": {"graspable": True, "fruit": True}},
-    "cube": {"obj_type": "box", "size": (0.025, 0.025, 0.025), "rgba": (0.9, 0.1, 0.1, 1.0), "mass": 0.05, "properties": {"graspable": True}},
+    "book": {
+        "obj_type": "box",
+        "size": (0.08, 0.06, 0.015),
+        "rgba": (0.2, 0.3, 0.7, 1.0),
+        "mass": 0.5,
+        "properties": {"graspable": True, "heavy": True, "weight_kg": 0.5},
+    },
+    "cup": {
+        "obj_type": "cylinder",
+        "size": (0.03, 0.05),
+        "rgba": (0.9, 0.85, 0.8, 1.0),
+        "mass": 0.2,
+        "properties": {"graspable": True, "container": True},
+    },
+    "pen": {
+        "obj_type": "cylinder",
+        "size": (0.005, 0.07),
+        "rgba": (0.1, 0.1, 0.1, 1.0),
+        "mass": 0.01,
+        "properties": {"graspable": True, "thin": True},
+    },
+    "paper": {
+        "obj_type": "box",
+        "size": (0.1, 0.07, 0.001),
+        "rgba": (1.0, 1.0, 0.95, 1.0),
+        "mass": 0.005,
+        "friction": (0.3, 0.001, 0.0001),
+        "properties": {"graspable": True, "loose": True, "fragile": True},
+    },
+    "apple": {
+        "obj_type": "sphere",
+        "size": (0.03,),
+        "rgba": (0.9, 0.15, 0.1, 1.0),
+        "mass": 0.15,
+        "properties": {"graspable": True, "fruit": True},
+    },
+    "banana": {
+        "obj_type": "cylinder",
+        "size": (0.015, 0.06),
+        "rgba": (1.0, 0.9, 0.2, 1.0),
+        "mass": 0.12,
+        "properties": {"graspable": True, "fruit": True},
+    },
+    "orange": {
+        "obj_type": "sphere",
+        "size": (0.035,),
+        "rgba": (1.0, 0.6, 0.0, 1.0),
+        "mass": 0.2,
+        "properties": {"graspable": True, "fruit": True},
+    },
+    "cube": {
+        "obj_type": "box",
+        "size": (0.025, 0.025, 0.025),
+        "rgba": (0.9, 0.1, 0.1, 1.0),
+        "mass": 0.05,
+        "properties": {"graspable": True},
+    },
 }
 
 
@@ -333,7 +664,8 @@ def scene_remove_object(req: RemoveObjectRequest):
 
     original_len = len(state.pipeline._scene_objects)
     state.pipeline._scene_objects = [
-        o for o in state.pipeline._scene_objects
+        o
+        for o in state.pipeline._scene_objects
         if o.name != req.name or o.properties.get("fixed")
     ]
 
@@ -358,15 +690,22 @@ def _rebuild_env():
 
 # ── MJPEG streaming ─────────────────────────────────────────────────────────
 
+
 @app.get("/api/sim/stream")
 async def sim_stream():
     """MJPEG streaming endpoint — renders MuJoCo at ~10fps."""
+
     async def generate():
         while True:
             if state.pipeline and state.pipeline.env:
                 try:
-                    frame = state.pipeline.env.render_offscreen(640, 480)
+                    frame = await asyncio.to_thread(
+                        state.pipeline.env.render_offscreen,
+                        640,
+                        480,
+                    )
                     from PIL import Image
+
                     img = Image.fromarray(frame)
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=75)
@@ -395,6 +734,7 @@ async def sim_stream():
 
 
 # ── Serialization ────────────────────────────────────────────────────────────
+
 
 def _serialize_result(result: PipelineResult) -> dict:
     """Convert PipelineResult to JSON-safe dict."""
@@ -459,13 +799,16 @@ def _serialize_result(result: PipelineResult) -> dict:
     if result.preview_frames:
         try:
             from PIL import Image
+
             valid = [f for f in result.preview_frames if isinstance(f, np.ndarray)]
             if len(valid) > 1:
                 # Animated GIF
                 images = [Image.fromarray(f) for f in valid]
                 buf = io.BytesIO()
                 images[0].save(
-                    buf, format="GIF", save_all=True,
+                    buf,
+                    format="GIF",
+                    save_all=True,
                     append_images=images[1:],
                     duration=80,  # 80ms per frame ≈ 12.5fps
                     loop=0,

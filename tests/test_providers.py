@@ -27,6 +27,11 @@ class TestLLMResponse:
         data = resp.parse_json()
         assert data == {"key": "value"}
 
+    def test_parse_json_with_concatenated_objects(self):
+        resp = LLMResponse(text='{"key": "first"}\n{"key": "second"}')
+        data = resp.parse_json()
+        assert data == {"key": "first"}
+
     def test_parse_json_caches(self):
         resp = LLMResponse(text='{"key": "value"}')
         data1 = resp.parse_json()

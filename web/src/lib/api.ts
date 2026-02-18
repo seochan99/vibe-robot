@@ -87,6 +87,145 @@ export async function sendCommand(
   return res.json();
 }
 
+export interface StageEvent {
+  stage: string;
+  message: string;
+}
+
+interface StreamOptions {
+  timeoutMs?: number;
+  onActivity?: () => void;
+}
+
+function parseSseBlock(block: string): { eventType: string; data: string } | null {
+  const lines = block.trim().split("\n");
+  let eventType = "";
+  const dataLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith("event: ")) {
+      eventType = line.slice(7).trim();
+    } else if (line.startsWith("data: ")) {
+      dataLines.push(line.slice(6));
+    }
+  }
+
+  const data = dataLines.join("\n");
+  if (!data) return null;
+  return { eventType, data };
+}
+
+/**
+ * Stream pipeline execution via SSE.
+ * Calls onStage for each pipeline stage update, then resolves with the final result.
+ */
+export async function sendCommandStream(
+  command: string,
+  scene: string,
+  model: string = "rule_based",
+  onStage: (evt: StageEvent) => void,
+  access_token?: string,
+  account_id?: string,
+  options?: StreamOptions,
+): Promise<PipelineResponse> {
+  console.info("[viberobot] stream request", { scene, model, command });
+  const body: Record<string, string> = { command, scene, model };
+  if (access_token) body.access_token = access_token;
+  if (account_id) body.account_id = account_id;
+
+  const timeoutMs = options?.timeoutMs ?? 180_000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/command/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("Pipeline timed out while waiting for server response");
+    }
+    throw err;
+  }
+
+  clearTimeout(timeout);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("No response body");
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: PipelineResponse | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    options?.onActivity?.();
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // Parse SSE events from buffer
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() || ""; // keep incomplete part
+
+    for (const part of parts) {
+      const parsedBlock = parseSseBlock(part);
+      if (!parsedBlock) continue;
+      const { eventType, data } = parsedBlock;
+
+      try {
+        const parsed = JSON.parse(data);
+        if (eventType === "stage") {
+          console.debug("[viberobot] stage", parsed);
+          onStage(parsed as StageEvent);
+        } else if (eventType === "result") {
+          console.info("[viberobot] stream result", {
+            stage: (parsed as PipelineResponse).stage,
+            error: (parsed as PipelineResponse).error,
+          });
+          finalResult = parsed as PipelineResponse;
+        } else if (eventType === "error") {
+          console.error("[viberobot] stream error event", parsed);
+          throw new Error(parsed.error || "Pipeline error");
+        } else if (eventType === "heartbeat") {
+          options?.onActivity?.();
+        }
+      } catch (e) {
+        if (e instanceof SyntaxError) continue; // ignore partial JSON
+        console.error("[viberobot] stream parse failure", e);
+        throw e;
+      }
+    }
+  }
+
+  // Some servers terminate without trailing blank line; parse any remaining block.
+  const rest = parseSseBlock(buffer);
+  if (rest) {
+    try {
+      const parsed = JSON.parse(rest.data);
+      if (rest.eventType === "stage") {
+        onStage(parsed as StageEvent);
+      } else if (rest.eventType === "result") {
+        finalResult = parsed as PipelineResponse;
+      } else if (rest.eventType === "error") {
+        throw new Error(parsed.error || "Pipeline error");
+      }
+    } catch (e) {
+      if (!(e instanceof SyntaxError)) throw e;
+    }
+  }
+
+  if (!finalResult) throw new Error("No result received from pipeline");
+  console.info("[viberobot] stream completed", { stage: finalResult.stage });
+  return finalResult;
+}
+
 export async function fetchModels(): Promise<AIModel[]> {
   try {
     const res = await fetch(`${API_BASE}/api/models`);

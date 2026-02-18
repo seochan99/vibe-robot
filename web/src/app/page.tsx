@@ -221,7 +221,7 @@ export default function LandingPage() {
                 <p className="text-[var(--muted)]">&gt; &quot;Move that thing over there&quot;</p>
                 <p className="text-[var(--tag)]">Intent: move mug to shelf</p>
                 <p className="text-[var(--tag)]">Safety: fragile object → slow speed</p>
-                <p className="text-[var(--tag)]">Sim preview → approve → safe move</p>
+                <p className="text-[var(--tag)]">Plan/safety checks → approve → safe move</p>
               </div>
             </motion.div>
           </motion.div>

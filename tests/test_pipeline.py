@@ -62,6 +62,8 @@ class TestPipelineE2E:
         assert result.stage == PipelineStage.AWAITING_APPROVAL
         assert result.plan is not None
         assert len(result.plan.steps) > 0
+        assert "sim_start" in result.timestamps
+        assert len(result.preview_frames) > 0
 
     def test_approve_and_execute(self):
         """Test approval + execution after pipeline pause."""
@@ -75,6 +77,19 @@ class TestPipelineE2E:
 
         result = pipeline.approve_and_execute(result)
         assert result.stage == PipelineStage.COMPLETED
+
+    def test_retry_guardrail_keeps_preferred_target(self):
+        """Retry feedback should keep previously targeted object."""
+        pipeline = _create_pipeline("sorting")
+        result = pipeline.run_sync(
+            "지금도 넘어지잖아 제대로 각도 보고 확인해서 집어서 올려줘 무조건!!",
+            auto_approve=False,
+            context_hint='Previous attempt target object: "banana_01".',
+            preferred_target="banana_01",
+        )
+        assert result.plan is not None
+        targets = [s.target for s in result.plan.steps]
+        assert "banana_01" in targets
 
     def test_pick_and_place_pipeline(self):
         """Test simple pick-and-place scenario."""
