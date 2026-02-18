@@ -3,6 +3,12 @@ import type { ExecutionResponse, PipelineResponse } from "@/lib/api";
 /** One-line summary shown above the preview */
 export function formatSummary(p: PipelineResponse): string {
   if (p.error) return p.error;
+  if (p.stage === "awaiting_approval" && p.plan) {
+    return (
+      `${p.plan.plan_description}\n\n` +
+      "Plan ready for approval. Click **Approve & Execute** to run on the right simulation panel."
+    );
+  }
   if (p.plan) return p.plan.plan_description;
   if (p.intent) return p.intent.intended_meaning;
   return "Processing...";
@@ -89,8 +95,13 @@ export function formatDetails(p: PipelineResponse): string {
 }
 
 export function formatExecution(e: ExecutionResponse): string {
-  if (e.success) {
-    return "Done!";
+  const lines: string[] = [];
+  lines.push(e.success ? "Execution complete." : `Execution failed: ${e.error || "Unknown error"}`);
+  if (e.results?.length) {
+    lines.push("");
+    for (const r of e.results) {
+      lines.push(`- ${r.success ? "[ok]" : "[fail]"} ${r.action}(${r.target}) - ${r.message}`);
+    }
   }
-  return `Failed — ${e.error || "Unknown error"}`;
+  return lines.join("\n");
 }

@@ -176,7 +176,28 @@ class MuJoCoEnv:
 
     def _get_ee_pose(self) -> tuple[np.ndarray, np.ndarray]:
         """Get end-effector (hand) position and orientation."""
-        # Try to find the hand site/body
+        # Prefer explicit EE/gripper sites if available.
+        for name in ["gripper", "grip_site", "ee_site", "attachment_site", "end_effector"]:
+            site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
+            if site_id >= 0:
+                pos = self.data.site_xpos[site_id].copy()
+                quat = np.zeros(4, dtype=float)
+                mujoco.mju_mat2Quat(quat, self.data.site_xmat[site_id].copy())
+                return pos, quat
+
+        # Use midpoint between left/right fingers when possible (best grasp center proxy).
+        left_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
+        right_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
+        if left_id >= 0 and right_id >= 0:
+            pos = 0.5 * (self.data.xpos[left_id] + self.data.xpos[right_id])
+            hand_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hand")
+            if hand_id >= 0:
+                quat = self.data.xquat[hand_id].copy()
+            else:
+                quat = np.array([1.0, 0.0, 0.0, 0.0])
+            return pos.copy(), quat
+
+        # Try to find the hand body.
         for name in ["hand", "grip_site", "end_effector"]:
             body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
             if body_id >= 0:
@@ -214,6 +235,17 @@ class MuJoCoEnv:
             body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
             if body_id >= 0:
                 return self.data.xpos[body_id].copy()
+            return None
+
+    def get_object_geom_size(self, name: str) -> Optional[np.ndarray]:
+        """Get representative geom size for a named object body."""
+        with self._lock:
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if body_id < 0:
+                return None
+            for geom_id in range(self.model.ngeom):
+                if self.model.geom_bodyid[geom_id] == body_id:
+                    return self.model.geom_size[geom_id].copy()
             return None
 
     def check_contact(self, name1: str, name2: str) -> bool:

@@ -11,6 +11,7 @@ import type {
 } from "@/lib/api";
 import {
   approveExecution,
+  rejectExecution,
   fetchModels,
   sendCommandStream,
   initScene,
@@ -376,6 +377,14 @@ export default function AppPage() {
   const handleApprove = useCallback(async () => {
     setAwaitingApproval(false);
     setLoading(true);
+    setPipelineStage("executing");
+    const startedAt = Date.now();
+    setRequestStartedAt(startedAt);
+    setLastStreamAt(startedAt);
+    addMessage({
+      role: "assistant",
+      content: "Executing approved plan in simulation...",
+    });
     try {
       const res = await approveExecution();
       addMessage({
@@ -383,6 +392,7 @@ export default function AppPage() {
         content: formatExecution(res),
         execution: res,
       });
+      refreshSceneObjects();
     } catch (err) {
       addMessage({
         role: "assistant",
@@ -390,16 +400,27 @@ export default function AppPage() {
       });
     } finally {
       setLoading(false);
+      setPipelineStage("idle");
+      setRequestStartedAt(null);
+      setLastStreamAt(null);
     }
-  }, [addMessage]);
+  }, [addMessage, refreshSceneObjects]);
 
   // Reject
-  const handleReject = useCallback(() => {
+  const handleReject = useCallback(async () => {
     setAwaitingApproval(false);
-    addMessage({
-      role: "assistant",
-      content: "Plan rejected. Send a new command to try again.",
-    });
+    try {
+      await rejectExecution();
+      addMessage({
+        role: "assistant",
+        content: "Plan rejected. Send a new command to try again.",
+      });
+    } catch (err) {
+      addMessage({
+        role: "assistant",
+        content: `Failed to reject plan: ${err instanceof Error ? err.message : "error"}`,
+      });
+    }
   }, [addMessage]);
 
   // Auth — open new tab + auto-detect via storage event

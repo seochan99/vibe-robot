@@ -52,7 +52,7 @@ class FrankaController:
     GRIPPER_OPEN = 0.04
     GRIPPER_CLOSED = 0.001
     GRASP_APPROACH_HEIGHT = 0.08   # approach from above
-    KINEMATIC_SNAP_DIST = 0.045    # for kinematic attachment fallback
+    KINEMATIC_SNAP_DIST = 0.065    # baseline for kinematic attachment fallback
 
     def __init__(self, env: MuJoCoEnv):
         self.env = env
@@ -85,19 +85,28 @@ class FrankaController:
         Returns:
             7-DOF joint configuration or None if IK fails.
         """
+        poses: list[SE3] = []
         if target_quat is None:
-            # Default: gripper pointing down
-            T = SE3(target_pos) * SE3.Rx(np.pi)
+            # Default top-down grasp, then angled fallbacks for edge-of-table reach.
+            base = SE3(target_pos)
+            poses.append(base * SE3.Rx(np.pi))
+            for tilt in (0.35, -0.35, 0.6, -0.6):
+                poses.append(base * SE3.Rx(np.pi) * SE3.Ry(tilt))
         else:
             # Convert MuJoCo quaternion (w,x,y,z) to rotation matrix
             R = np.zeros((3, 3))
             mujoco.mju_quat2Mat(R.ravel(), target_quat)
-            T = SE3.Rt(R, target_pos)
+            poses.append(SE3.Rt(R, target_pos))
 
-        q0 = self.get_joint_positions()
-        sol = self._rtb_panda.ikine_LM(T, q0=q0, ilimit=500, slimit=100)
-        if sol.success:
-            return sol.q
+        seed_guesses = [
+            self.get_joint_positions(),
+            self.env.HOME_QPOS[:7].copy(),
+        ]
+        for q0 in seed_guesses:
+            for T in poses:
+                sol = self._rtb_panda.ikine_LM(T, q0=q0, ilimit=500, slimit=100)
+                if sol.success:
+                    return sol.q
         return None
 
     def move_to_joint(
@@ -162,7 +171,13 @@ class FrankaController:
         """
         target_q = self.solve_ik(target_pos, target_quat)
         if target_q is None:
-            return MotionResult(success=False, message=f"IK failed for target {target_pos}")
+            return MotionResult(
+                success=False,
+                message=(
+                    "IK failed for target "
+                    f"{target_pos} (pose likely unreachable in current configuration)"
+                ),
+            )
 
         # Check workspace bounds
         if not self.env.check_workspace_bounds(target_pos):
@@ -234,19 +249,30 @@ class FrankaController:
         ]
 
         attached = False
+        total_ik_failures = 0
+        total_cartesian_moves = 0
+        last_move_error = ""
         for attempt_i, offset in enumerate(grasp_offsets):
             candidate = obj_pos + offset
 
             approach_pos = candidate.copy()
             approach_pos[2] += approach_h
+            total_cartesian_moves += 1
             result = self.move_to(approach_pos, duration=0.9 if attempt_i > 0 else 1.0)
             if not result.success:
+                last_move_error = result.message
+                if "IK failed" in result.message:
+                    total_ik_failures += 1
                 continue
 
             grasp_pos = candidate.copy()
             grasp_pos[2] += 0.012
+            total_cartesian_moves += 1
             result = self.move_to(grasp_pos, duration=1.1)
             if not result.success:
+                last_move_error = result.message
+                if "IK failed" in result.message:
+                    total_ik_failures += 1
                 continue
 
             self.close_gripper(duration=0.7)
@@ -258,9 +284,20 @@ class FrankaController:
             self.open_gripper(duration=0.35)
 
         if not attached:
+            if total_cartesian_moves > 0 and total_ik_failures == total_cartesian_moves:
+                return MotionResult(
+                    success=False,
+                    message=(
+                        f"Failed to grasp '{object_name}': target appears unreachable "
+                        "(IK failed on all grasp approaches)"
+                    ),
+                )
             return MotionResult(
                 success=False,
-                message=f"Failed to grasp '{object_name}' after {len(grasp_offsets)} attempts",
+                message=(
+                    f"Failed to grasp '{object_name}' after {len(grasp_offsets)} attempts"
+                    + (f" ({last_move_error})" if last_move_error else "")
+                ),
             )
 
         # 3. Controlled two-stage vertical lift to reduce wobble right after grasp.
@@ -295,10 +332,25 @@ class FrankaController:
             return False
 
         dist = np.linalg.norm(ee_pos - current_obj_pos)
-        if dist < self.KINEMATIC_SNAP_DIST * snap_scale:
+        geom_size = self.env.get_object_geom_size(object_name)
+        obj_scale = float(np.max(geom_size)) if geom_size is not None else 0.0
+        threshold = float(
+            np.clip(
+                (self.KINEMATIC_SNAP_DIST * snap_scale) + (0.55 * obj_scale),
+                0.045,
+                0.12,
+            )
+        )
+        if dist < threshold:
             self._attached_object = object_name
             return True
         return False
+
+    def attempt_attach(self, object_name: str, snap_scale: float = 1.6) -> MotionResult:
+        """Attempt to kinematically latch an object after a manual close-gripper step."""
+        if self._try_kinematic_attach(object_name, snap_scale=snap_scale):
+            return MotionResult(True, f"Attached '{object_name}'")
+        return MotionResult(False, f"Failed to secure '{object_name}'")
 
     def place(
         self,
@@ -313,6 +365,19 @@ class FrankaController:
         approach_h = approach_height or self.GRASP_APPROACH_HEIGHT
 
         target_pos = np.asarray(target_pos, dtype=float)
+
+        if self._attached_object is None:
+            return MotionResult(
+                success=False,
+                message=f"Cannot place '{object_name}': no object currently grasped",
+            )
+        if object_name not in ("held_object", self._attached_object):
+            return MotionResult(
+                success=False,
+                message=(
+                    f"Cannot place '{object_name}': holding '{self._attached_object}'"
+                ),
+            )
 
         # 1. Move above target
         above_pos = target_pos.copy()
@@ -336,6 +401,11 @@ class FrankaController:
         retreat_pos = place_pos.copy()
         retreat_pos[2] += approach_h
         result = self.move_to(retreat_pos, duration=1.0)
+        if not result.success:
+            return MotionResult(
+                success=False,
+                message=f"Released '{object_name}' but retreat failed: {result.message}",
+            )
 
         return MotionResult(
             success=True,

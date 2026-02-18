@@ -156,22 +156,56 @@ class VibeRobotPipeline:
         normalized: list[PlanStep] = []
         held_target: str | None = None
         placement_index = 0
+        object_pos: dict[str, list[float]] = {
+            obj.name: list(obj.position) for obj in scene.objects
+        }
 
-        for step in plan.steps:
+        resolved_targets: list[str] = [
+            self._resolve_plan_target_name(step.target, scene) for step in plan.steps
+        ]
+
+        for idx, step in enumerate(plan.steps):
             target = self._resolve_plan_target_name(step.target, scene)
             params = dict(step.params or {})
 
             if step.action == "pick":
                 held_target = target
 
+            if (
+                step.action == "move_to"
+                and "position" not in params
+                and target in object_pos
+            ):
+                obj_pos = object_pos[target]
+                next_action = plan.steps[idx + 1].action if idx + 1 < len(plan.steps) else ""
+                next_target = resolved_targets[idx + 1] if idx + 1 < len(resolved_targets) else ""
+
+                # Interpret semantic move_to(object) steps into concrete Cartesian goals.
+                if held_target and target == held_target:
+                    # Move held object upward to a safe transport height.
+                    pos = [obj_pos[0], obj_pos[1], obj_pos[2] + 0.18]
+                elif next_action == "close_gripper" and next_target == target:
+                    # Pre-close descent near object center.
+                    pos = [obj_pos[0], obj_pos[1], obj_pos[2] + 0.02]
+                else:
+                    # Generic approach above object.
+                    pos = [obj_pos[0], obj_pos[1], obj_pos[2] + 0.12]
+
+                params["position"] = self._clamp_position(pos)
+                if notify:
+                    notify(
+                        "plan_normalization",
+                        f"Auto-filled move_to target for {target}: {params['position']}",
+                    )
+
+            if "position" in params and isinstance(params.get("position"), (list, tuple)):
+                pos = list(params.get("position", []))
+                if len(pos) >= 3:
+                    params["position"] = self._clamp_position(pos)
+
             if step.action == "place":
                 if (not target or target == "held_object") and held_target:
                     target = held_target
-
-                if "position" in params and isinstance(params.get("position"), (list, tuple)):
-                    pos = list(params.get("position", []))
-                    if len(pos) >= 3:
-                        params["position"] = self._clamp_position(pos)
 
                 if "position" not in params and "on" not in params:
                     if low_clearing:
@@ -185,6 +219,12 @@ class VibeRobotPipeline:
                             "plan_normalization",
                             f"Auto-filled place target for {target}: {params['position']}",
                         )
+                held_target = None
+
+            if step.action == "open_gripper":
+                held_target = None
+            elif step.action == "close_gripper" and target:
+                held_target = target
 
             normalized.append(
                 PlanStep(
@@ -772,12 +812,26 @@ class VibeRobotPipeline:
                     return self.controller.place(step.target, target_pos)
             return MotionResult(False, "No target position for place")
         elif step.action == "move_to":
-            pos = step.params.get("position", [0.5, 0.0, 0.4])
+            pos = step.params.get("position")
+            if pos is None and step.target and step.target != "held_object":
+                obj_pos = self.env.get_object_pos(step.target)
+                if obj_pos is not None:
+                    pos = [float(obj_pos[0]), float(obj_pos[1]), float(obj_pos[2] + 0.12)]
+            if pos is None:
+                pos = [0.5, 0.0, 0.4]
             return self.controller.move_to(np.array(pos))
         elif step.action == "open_gripper":
             return self.controller.open_gripper()
         elif step.action == "close_gripper":
-            return self.controller.close_gripper()
+            result = self.controller.close_gripper()
+            if step.target and step.target != "held_object" and not self.controller.is_holding:
+                attach_result = self.controller.attempt_attach(step.target, snap_scale=1.8)
+                if not attach_result.success:
+                    return MotionResult(
+                        False,
+                        f"Closed gripper but failed to secure '{step.target}'",
+                    )
+            return result
         elif step.action == "wait":
             duration = step.params.get("duration", 1.0)
             n_steps = int(duration / self.env._control_dt)

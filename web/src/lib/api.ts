@@ -243,6 +243,12 @@ export async function approveExecution(): Promise<ExecutionResponse> {
   return res.json();
 }
 
+export async function rejectExecution(): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/api/reject`, { method: "POST" });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
 export async function initScene(scene: string): Promise<{ status: string }> {
   const res = await fetch(`${API_BASE}/api/scene/init`, {
     method: "POST",

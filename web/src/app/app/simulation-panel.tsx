@@ -112,7 +112,7 @@ export function SimulationPanel({
             />
             {loading && (
               <div className="absolute bottom-3 left-3 right-3 rounded-lg border border-white/20 bg-black/60 backdrop-blur-sm px-3 py-2 text-xs text-white/90">
-                Live simulation view · planning/safety checks in progress ({stageLabel})
+                Live simulation view · working ({stageLabel})
               </div>
             )}
           </>

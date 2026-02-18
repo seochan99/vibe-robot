@@ -16,7 +16,12 @@ from core.pipeline import PipelineStage, VibeRobotPipeline
 from core.planner import ExecutionPlan, PlanStep
 from simulator.franka_controller import FrankaController
 from simulator.mujoco_env import MuJoCoEnv
-from simulator.scene_builder import TASK_PRESETS, build_scene_xml, get_scene_objects_info
+from simulator.scene_builder import (
+    TASK_PRESETS,
+    SceneObject,
+    build_scene_xml,
+    get_scene_objects_info,
+)
 
 
 def _create_pipeline(scene_name: str = "wind_paper"):
@@ -163,6 +168,69 @@ class TestPipelineE2E:
         assert len(results) == 1
         assert results[0]["action"] == "pick"
         assert not results[0]["success"]
+
+    def test_plan_normalization_resolves_move_to_target_into_position(self):
+        pipeline = _create_pipeline("pick_and_place")
+        scene = pipeline.scene_engine.analyze_from_metadata(
+            get_scene_objects_info(pipeline._scene_objects)
+        )
+        intent = pipeline.intent_engine.infer_sync(
+            "pick the red cube",
+            pipeline._get_scene_summary(),
+        )
+        plan = ExecutionPlan(
+            steps=[
+                PlanStep(action="move_to", target="red_cube"),
+                PlanStep(action="close_gripper", target="red_cube"),
+            ],
+            plan_description="semantic move then close",
+            estimated_duration=2.0,
+        )
+        normalized = pipeline._normalize_plan_for_execution(plan, scene, intent)
+        assert "position" in normalized.steps[0].params
+        assert len(normalized.steps[0].params["position"]) == 3
+
+    def test_place_without_holding_fails(self):
+        pipeline = _create_pipeline("wind_paper")
+        result = pipeline._execute_step(
+            PlanStep(
+                action="place",
+                target="book_01",
+                params={"position": [0.45, 0.0, 0.35]},
+            )
+        )
+        assert not result.success
+
+    def test_pick_near_edge_uses_ik_fallback_orientation(self):
+        objects = list(TASK_PRESETS["wind_paper"]) + [
+            SceneObject(
+                name="cube",
+                obj_type="box",
+                size=(0.025, 0.025, 0.025),
+                pos=(0.80, -0.16, 0.35),
+                rgba=(0.9, 0.1, 0.1, 1.0),
+                mass=0.05,
+                properties={"graspable": True},
+            )
+        ]
+        xml = build_scene_xml(objects, include_wind=True)
+        env = MuJoCoEnv(xml_string=xml)
+        controller = FrankaController(env)
+        env.reset()
+        pipeline = VibeRobotPipeline(env, controller, scene_objects=objects)
+
+        plan = ExecutionPlan(
+            steps=[PlanStep(action="pick", target="cube")],
+            plan_description="pick edge cube",
+            estimated_duration=4.0,
+        )
+        contract = pipeline.safety_gen.generate(plan)
+        results = pipeline._execute_plan(plan, contract)
+
+        assert results
+        assert results[0]["action"] == "pick"
+        assert results[0]["target"] == "cube"
+        assert results[0]["success"]
 
 
 class TestSafetyContract:
