@@ -30,21 +30,38 @@ class UserIntent:
     alternative_interpretations: list[str] = field(default_factory=list)
 
 
-INTENT_INFERENCE_PROMPT = """You are a Theory of Mind reasoning engine for a robotic arm system.
+INTENT_INFERENCE_PROMPT = """You are a Theory of Mind reasoning engine for a Franka Panda robotic arm system on a desk.
 
-A user has given a command to a robot arm operating on a tabletop. Your job is to infer
-their TRUE intent using Gricean implicature (pragmatic reasoning).
+Your job: infer the user's TRUE intent from a possibly vague or colloquial command, using Gricean implicature (pragmatic reasoning). Users may speak in Korean or English.
 
 Key principles:
-- Users often speak colloquially and assume shared context
+- Users speak colloquially and assume shared context
 - The literal meaning is usually NOT the full intent
 - Consider: What problem are they trying to solve? What constraints are implicit?
 - Consider both the immediate goal and the deeper motivation
+- Look at the scene objects and their properties to understand what actions are feasible
 
 Scene context:
 {scene_context}
 
 User command: "{command}"
+
+Few-shot examples:
+
+Example 1 (Korean):
+Command: "날라가지 않게 막아!!"
+Scene: paper_01 (loose, fragile), book_01 (heavy, 0.5kg)
+Result: User wants to prevent loose paper from blowing away. The heavy book can be used as a paperweight. Implicit: don't damage paper, solution should be reversible.
+
+Example 2 (English):
+Command: "Clean up the desk"
+Scene: red_cube, blue_bin (container)
+Result: User wants objects moved into the container. Implicit: place carefully, don't knock things over.
+
+Example 3 (Korean):
+Command: "책 좀 집어줘"
+Scene: book_01 at (0.35, 0.15, 0.335)
+Result: User wants the robot to pick up the book. Simple pick action.
 
 Respond in JSON:
 {{
@@ -52,7 +69,7 @@ Respond in JSON:
     "intended_meaning": "What the user actually wants the robot to do",
     "immediate_goal": "The direct, actionable goal",
     "deep_goal": "The underlying motivation/need",
-    "target_objects": ["object names relevant to the task"],
+    "target_objects": ["object names from the scene relevant to the task"],
     "implicit_constraints": [
         "constraint1 (e.g. don't damage the paper)",
         "constraint2 (e.g. solution should be reversible)"
@@ -162,7 +179,7 @@ _KEYWORD_PATTERNS = {
         "intent": {
             "literal_meaning": "Prevent something from flying away",
             "intended_meaning": "Secure loose objects against wind/disturbance",
-            "immediate_goal": "Fix papers/loose objects in place",
+            "immediate_goal": "secure",
             "deep_goal": "Preserve documents/work materials",
             "implicit_constraints": [
                 "Do not damage the loose objects",
@@ -176,7 +193,7 @@ _KEYWORD_PATTERNS = {
         "intent": {
             "literal_meaning": "Clean up / remove items",
             "intended_meaning": "Move specified objects off the workspace",
-            "immediate_goal": "Clear objects from the desk surface",
+            "immediate_goal": "clean",
             "deep_goal": "Create a clean, organized workspace",
             "implicit_constraints": [
                 "Don't throw objects — place them carefully",
@@ -189,7 +206,7 @@ _KEYWORD_PATTERNS = {
         "intent": {
             "literal_meaning": "Move an object to a location",
             "intended_meaning": "Relocate a specific object to a target",
-            "immediate_goal": "Transport object to destination",
+            "immediate_goal": "move",
             "deep_goal": "Reorganize workspace as desired",
             "implicit_constraints": [
                 "Handle objects carefully",
@@ -201,12 +218,51 @@ _KEYWORD_PATTERNS = {
         "keywords": ["집어", "잡아", "pick", "grab", "들어", "가져"],
         "intent": {
             "literal_meaning": "Pick up an object",
-            "intended_meaning": "Grasp and hold a specific object",
-            "immediate_goal": "Securely grasp the object",
+            "intended_meaning": "Grasp and lift a specific object",
+            "immediate_goal": "pick",
             "deep_goal": "Prepare object for subsequent action",
             "implicit_constraints": [
                 "Grip firmly but don't crush",
                 "Approach from a safe angle",
+            ],
+        },
+    },
+    "hold": {
+        "keywords": ["잡고", "가만", "hold", "stay", "keep", "유지"],
+        "intent": {
+            "literal_meaning": "Hold an object in place",
+            "intended_meaning": "Pick up and hold an object still",
+            "immediate_goal": "hold",
+            "deep_goal": "Maintain object in a steady position",
+            "implicit_constraints": [
+                "Don't move after grasping",
+                "Keep a firm grip",
+            ],
+        },
+    },
+    "sort": {
+        "keywords": ["정렬", "분류", "sort", "organize", "나눠", "골라"],
+        "intent": {
+            "literal_meaning": "Sort or organize objects",
+            "intended_meaning": "Organize objects by category",
+            "immediate_goal": "sort",
+            "deep_goal": "Create an orderly arrangement",
+            "implicit_constraints": [
+                "Group similar items together",
+                "Handle each object carefully",
+            ],
+        },
+    },
+    "place": {
+        "keywords": ["내려놓", "놔", "put down", "release", "내려"],
+        "intent": {
+            "literal_meaning": "Put down an object",
+            "intended_meaning": "Place the held object down",
+            "immediate_goal": "place",
+            "deep_goal": "Safely release the object",
+            "implicit_constraints": [
+                "Place gently",
+                "Put on a stable surface",
             ],
         },
     },
@@ -257,13 +313,51 @@ def _rule_based_inference(command: str, scene_context: str) -> UserIntent:
     )
 
 
+_KO_EN_OBJECT_MAP: dict[str, str] = {
+    "사과": "apple",
+    "바나나": "banana",
+    "오렌지": "orange",
+    "책": "book",
+    "종이": "paper",
+    "컵": "cup",
+    "펜": "pen",
+    "큐브": "cube",
+    "상자": "bin",
+    "빨간": "red_cube",
+    "파란": "blue_bin",
+}
+
+_EN_OBJECT_NAMES = ["book", "paper", "cup", "pen", "cube", "bin", "apple", "banana", "orange",
+                    "red_cube", "blue_bin"]
+
+
 def _extract_target_objects(command: str, scene_context: str, intent_data: dict) -> list[str]:
-    """Extract likely target object names from command and scene context."""
-    objects = []
-    # Common object names to look for
-    obj_names = ["book", "paper", "cup", "pen", "cube", "bin", "apple", "banana", "orange"]
-    combined = (command + " " + scene_context).lower()
-    for name in obj_names:
-        if name in combined:
-            objects.append(name)
-    return objects
+    """Extract target object names from the user command.
+
+    Prioritizes objects explicitly mentioned in the command.
+    Falls back to scene context only if nothing found in command.
+    """
+    cmd_lower = command.lower()
+
+    # 1) Match Korean object names in command → translate to English
+    from_command: list[str] = []
+    for ko, en in _KO_EN_OBJECT_MAP.items():
+        if ko in cmd_lower:
+            from_command.append(en)
+
+    # 2) Match English object names in command
+    for name in _EN_OBJECT_NAMES:
+        if name in cmd_lower and name not in from_command:
+            from_command.append(name)
+
+    # If user explicitly mentioned objects, return only those
+    if from_command:
+        return from_command
+
+    # 3) Fallback: look in scene context (but only return objects, not all scene names)
+    scene_lower = scene_context.lower()
+    from_scene = []
+    for name in _EN_OBJECT_NAMES:
+        if name in scene_lower:
+            from_scene.append(name)
+    return from_scene

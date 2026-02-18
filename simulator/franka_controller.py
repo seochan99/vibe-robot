@@ -6,6 +6,7 @@ Uses roboticstoolbox-python for IK and provides high-level motion primitives
 
 from __future__ import annotations
 
+import time
 from enum import Enum
 from typing import Optional
 
@@ -57,6 +58,7 @@ class FrankaController:
         self.env = env
         self._gripper_state = GripperState.OPEN
         self._attached_object: Optional[str] = None
+        self.realtime = False  # When True, pace execution to wall-clock time
 
         # roboticstoolbox Panda model for IK
         self._rtb_panda = rtb.models.Panda()
@@ -113,6 +115,8 @@ class FrankaController:
 
         gripper_ctrl = self.GRIPPER_OPEN if self._gripper_state == GripperState.OPEN else self.GRIPPER_CLOSED
 
+        wall_start = time.monotonic()
+
         for i in range(n_steps):
             # Cosine interpolation for smooth motion
             t = 0.5 * (1 - np.cos(np.pi * (i + 1) / n_steps))
@@ -130,6 +134,14 @@ class FrankaController:
             # Update kinematic attachment if holding an object
             if self._attached_object:
                 self._update_attachment()
+
+            # Real-time pacing: sleep to match wall-clock time
+            if self.realtime:
+                sim_elapsed = (i + 1) * self.env._control_dt
+                wall_elapsed = time.monotonic() - wall_start
+                sleep_time = sim_elapsed - wall_elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
         return MotionResult(success=True, message="Joint motion complete")
 
@@ -167,9 +179,15 @@ class FrankaController:
         ctrl[:7] = current_q
         ctrl[7:] = self.GRIPPER_OPEN
 
+        wall_start = time.monotonic()
         n_steps = int(duration / self.env._control_dt)
-        for _ in range(n_steps):
+        for i in range(n_steps):
             self.env.step_control(ctrl)
+            if self.realtime:
+                sim_elapsed = (i + 1) * self.env._control_dt
+                sleep_time = sim_elapsed - (time.monotonic() - wall_start)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
         return MotionResult(success=True, message="Gripper opened")
 
     def close_gripper(self, duration: float = 0.5) -> MotionResult:
@@ -180,9 +198,15 @@ class FrankaController:
         ctrl[:7] = current_q
         ctrl[7:] = self.GRIPPER_CLOSED
 
+        wall_start = time.monotonic()
         n_steps = int(duration / self.env._control_dt)
-        for _ in range(n_steps):
+        for i in range(n_steps):
             self.env.step_control(ctrl)
+            if self.realtime:
+                sim_elapsed = (i + 1) * self.env._control_dt
+                sleep_time = sim_elapsed - (time.monotonic() - wall_start)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
         return MotionResult(success=True, message="Gripper closed")
 
     def pick(self, object_name: str, approach_height: float = None) -> MotionResult:

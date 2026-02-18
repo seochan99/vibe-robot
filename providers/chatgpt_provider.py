@@ -45,10 +45,17 @@ class ChatGPTOAuthProvider(LLMProvider):
     """LLM provider using ChatGPT Plus/Pro subscription via OAuth.
 
     Usage:
+        # From backend auth (stored tokens):
         auth = ChatGPTAuth()
-        auth.login()  # or auth.load()
-
+        auth.login()
         provider = ChatGPTOAuthProvider(auth)
+
+        # From frontend raw token (web app flow):
+        provider = ChatGPTOAuthProvider(
+            access_token="eyJ...",
+            account_id="acc_...",
+        )
+
         response = await provider.generate("Analyze this scene...")
     """
 
@@ -57,8 +64,14 @@ class ChatGPTOAuthProvider(LLMProvider):
         auth: Optional[ChatGPTAuth] = None,
         model: str = DEFAULT_MODEL,
         instructions: str = DEFAULT_INSTRUCTIONS,
+        access_token: Optional[str] = None,
+        account_id: Optional[str] = None,
     ):
-        self._auth = auth or ChatGPTAuth()
+        self._auth = auth if not access_token else None
+        self._raw_token = access_token
+        self._raw_account_id = account_id or ""
+        if not access_token and auth is None:
+            self._auth = ChatGPTAuth()
         self._model = model
         self._instructions = instructions
         self._session_id = str(uuid.uuid4())
@@ -69,7 +82,9 @@ class ChatGPTOAuthProvider(LLMProvider):
 
     @property
     def is_authenticated(self) -> bool:
-        return self._auth.is_authenticated
+        if self._raw_token:
+            return True
+        return self._auth.is_authenticated if self._auth else False
 
     @property
     def model(self) -> str:
@@ -114,8 +129,12 @@ class ChatGPTOAuthProvider(LLMProvider):
         Calls chatgpt.com/backend-api/codex/responses with OAuth JWT token.
         Parses SSE streaming response.
         """
-        access_token = self._auth.get_access_token()
-        account_id = self._auth.get_account_id()
+        if self._raw_token:
+            access_token = self._raw_token
+            account_id = self._raw_account_id
+        else:
+            access_token = self._auth.get_access_token()
+            account_id = self._auth.get_account_id()
 
         # Build request headers
         headers = {
@@ -178,7 +197,7 @@ class ChatGPTOAuthProvider(LLMProvider):
             timeout=120,
         )
 
-        if resp.status_code == 401:
+        if resp.status_code == 401 and self._auth:
             # Token might be expired, try refreshing
             self._auth._refresh_tokens()
             headers["Authorization"] = f"Bearer {self._auth.get_access_token()}"

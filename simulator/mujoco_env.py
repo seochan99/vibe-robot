@@ -82,6 +82,13 @@ class MuJoCoEnv:
         self._steps_per_control = int(self._control_dt / self._timestep)
         self._renderer = None
         self._trajectory: list[dict] = []
+        # Frame capture mode for GIF generation
+        self._capture_frames = False
+        self._capture_every: int = 10
+        self._capture_counter: int = 0
+        self._captured_frames: list[np.ndarray] = []
+        self._capture_width: int = 320
+        self._capture_height: int = 240
 
     def reset(self, qpos: Optional[np.ndarray] = None) -> SimState:
         """Reset simulation to initial or specified state."""
@@ -109,7 +116,30 @@ class MuJoCoEnv:
 
     def step_control(self, ctrl: Optional[np.ndarray] = None) -> SimState:
         """Step one control cycle (multiple physics steps)."""
-        return self.step(ctrl, n_steps=self._steps_per_control)
+        result = self.step(ctrl, n_steps=self._steps_per_control)
+        if self._capture_frames:
+            self._capture_counter += 1
+            if self._capture_counter % self._capture_every == 0:
+                self._captured_frames.append(
+                    self.render_offscreen(self._capture_width, self._capture_height)
+                )
+        return result
+
+    def enable_frame_capture(self, every_n: int = 10, width: int = 320, height: int = 240) -> None:
+        """Start auto-capturing frames every N control steps."""
+        self._capture_frames = True
+        self._capture_every = every_n
+        self._capture_counter = 0
+        self._captured_frames = []
+        self._capture_width = width
+        self._capture_height = height
+
+    def disable_frame_capture(self) -> list[np.ndarray]:
+        """Stop capturing and return all captured frames."""
+        self._capture_frames = False
+        frames = self._captured_frames
+        self._captured_frames = []
+        return frames
 
     def get_state(self) -> SimState:
         """Get current simulation state."""

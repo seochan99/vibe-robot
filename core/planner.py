@@ -40,19 +40,19 @@ class ExecutionPlan:
     requires_approval: bool = True
 
 
-PLANNER_PROMPT = """You are a robotic task planner using Code-as-Policies approach.
+PLANNER_PROMPT = """You are a robotic task planner for a Franka Panda arm using Code-as-Policies approach.
 
 Given the scene analysis, user intent, and affordance analysis, generate an execution
-plan as a sequence of robot primitives.
+plan as a sequence of robot primitives. The robot's workspace is approximately x=[0.1, 0.8], y=[-0.5, 0.5], z=[0.0, 0.8].
 
 Available primitives:
-- pick(object_name): Pick up an object
-- place(object_name, target_position=[x,y,z]): Place object at position
-- place(object_name, on=target_object): Place object on another object
-- move_to(position=[x,y,z]): Move end-effector to position
-- open_gripper(): Open gripper fingers
-- close_gripper(): Close gripper fingers
-- wait(duration): Wait for specified seconds
+- pick(object_name): Approach and grasp an object. The robot will navigate to the object's position and close the gripper.
+- place(object_name, position=[x,y,z]): Place the held object at the specified 3D position.
+- place(object_name, on=target_object): Place the held object on top of another object (auto-calculates position).
+- move_to(position=[x,y,z]): Move end-effector to a specific position (no grasp change).
+- open_gripper(): Open gripper fingers to release an object.
+- close_gripper(): Close gripper fingers to grasp.
+- wait(duration): Wait for specified seconds (useful for stabilization).
 
 Scene:
 {scene_info}
@@ -63,7 +63,20 @@ User Intent:
 Affordance Analysis:
 {affordance_info}
 
-Generate a plan in JSON:
+Example plan (placing book on paper to prevent flying):
+{{
+    "steps": [
+        {{"action": "pick", "target": "book_01", "params": {{}}, "description": "Pick up the heavy book"}},
+        {{"action": "place", "target": "book_01", "params": {{"on": "paper_01"}}, "description": "Place book on paper as paperweight"}}
+    ],
+    "plan_description": "Use book as paperweight on paper",
+    "estimated_duration": 8.0,
+    "risk_level": "low",
+    "reasoning": "The book is heavy enough to secure the paper against wind"
+}}
+
+Generate a plan in JSON. Use exact object names from the scene (e.g., "book_01", not "book"). Include position coordinates when using place with position param.
+
 {{
     "steps": [
         {{"action": "pick", "target": "object_name", "params": {{}}, "description": "..."}},
@@ -108,15 +121,120 @@ class Planner:
         affordance: AffordanceAnalysis,
     ) -> ExecutionPlan:
         """Synchronous plan generation using rule-based logic."""
-        # Pattern matching for common scenarios
+        goal = intent.immediate_goal.lower()
+
+        # Goal-based dispatch first
+        if goal in ("pick", "grab"):
+            return self._plan_pick_only(scene, intent, affordance)
+        elif goal in ("hold",):
+            return self._plan_hold(scene, intent, affordance)
+        elif goal in ("place", "put_down"):
+            return self._plan_place_down(scene, intent, affordance)
+        elif goal in ("sort", "organize"):
+            return self._plan_sorting(scene, intent, affordance)
+        elif goal in ("clean", "clear"):
+            if affordance.recommended_affordance == "containment":
+                return self._plan_sorting(scene, intent, affordance)
+            return self._plan_generic_pick_place(scene, intent, affordance)
+        elif goal in ("move", "relocate", "transport"):
+            return self._plan_simple_move(scene, intent, affordance)
+        elif goal in ("secure",):
+            if affordance.recommended_affordance == "weight_provider":
+                return self._plan_weight_placement(scene, intent, affordance)
+            return self._plan_generic_pick_place(scene, intent, affordance)
+
+        # Affordance-based fallback
         if affordance.recommended_affordance == "weight_provider":
             return self._plan_weight_placement(scene, intent, affordance)
         elif affordance.recommended_affordance == "containment":
             return self._plan_sorting(scene, intent, affordance)
-        elif intent.immediate_goal.lower() in ("move", "relocate", "transport"):
-            return self._plan_simple_move(scene, intent, affordance)
-        else:
-            return self._plan_generic_pick_place(scene, intent, affordance)
+
+        return self._plan_generic_pick_place(scene, intent, affordance)
+
+    def _plan_pick_only(
+        self,
+        scene: SceneState,
+        intent: UserIntent,
+        affordance: AffordanceAnalysis,
+    ) -> ExecutionPlan:
+        """Plan for just picking up an object (no placement)."""
+        obj = None
+        if intent.target_objects:
+            obj = self._resolve_object_name(intent.target_objects[0], scene)
+        if not obj:
+            obj = affordance.recommended_object
+        if not obj:
+            return self._plan_fallback(intent, "No target object specified")
+
+        steps = [
+            PlanStep(action="pick", target=obj, description=f"Pick up {obj}"),
+        ]
+
+        return ExecutionPlan(
+            steps=steps,
+            plan_description=f"Pick up {obj}",
+            estimated_duration=4.0,
+            risk_level="low",
+            reasoning=f"User asked to pick up {obj}. Will grasp and lift the object.",
+        )
+
+    def _plan_hold(
+        self,
+        scene: SceneState,
+        intent: UserIntent,
+        affordance: AffordanceAnalysis,
+    ) -> ExecutionPlan:
+        """Plan for picking up and holding an object still."""
+        obj = None
+        if intent.target_objects:
+            obj = self._resolve_object_name(intent.target_objects[0], scene)
+        if not obj:
+            obj = affordance.recommended_object
+        if not obj:
+            return self._plan_fallback(intent, "No target object specified")
+
+        steps = [
+            PlanStep(action="pick", target=obj, description=f"Pick up {obj}"),
+            PlanStep(action="wait", target=obj, params={"duration": 3.0}, description=f"Hold {obj} steady"),
+        ]
+
+        return ExecutionPlan(
+            steps=steps,
+            plan_description=f"Pick up and hold {obj}",
+            estimated_duration=7.0,
+            risk_level="low",
+            reasoning=f"User asked to hold {obj}. Will grasp, lift, and hold in place.",
+        )
+
+    def _plan_place_down(
+        self,
+        scene: SceneState,
+        intent: UserIntent,
+        affordance: AffordanceAnalysis,
+    ) -> ExecutionPlan:
+        """Plan for placing down the currently held object."""
+        obj = None
+        if intent.target_objects:
+            obj = self._resolve_object_name(intent.target_objects[0], scene)
+        if not obj:
+            obj = "held_object"
+
+        steps = [
+            PlanStep(
+                action="place",
+                target=obj,
+                params={"position": [0.5, 0.0, 0.35]},
+                description=f"Place {obj} down on the desk",
+            ),
+        ]
+
+        return ExecutionPlan(
+            steps=steps,
+            plan_description=f"Place {obj} down",
+            estimated_duration=3.0,
+            risk_level="low",
+            reasoning=f"User asked to put down {obj}. Will lower and release.",
+        )
 
     def _plan_weight_placement(
         self,
@@ -243,13 +361,7 @@ class Planner:
         if not target_obj:
             return self._plan_fallback(intent, "No target object specified")
 
-        # Find actual object name in scene
-        actual_name = None
-        for obj in scene.objects:
-            if target_obj.lower() in obj.name.lower() or target_obj.lower() in obj.category.lower():
-                actual_name = obj.name
-                break
-
+        actual_name = self._resolve_object_name(target_obj, scene)
         if not actual_name:
             return self._plan_fallback(intent, f"Object '{target_obj}' not found in scene")
 
@@ -278,9 +390,13 @@ class Planner:
         affordance: AffordanceAnalysis,
     ) -> ExecutionPlan:
         """Fallback: generic pick-and-place plan."""
-        obj = affordance.recommended_object or (
-            intent.target_objects[0] if intent.target_objects else None
-        )
+        # Prefer user's explicitly mentioned target over affordance recommendation
+        obj = None
+        if intent.target_objects:
+            # Try to resolve to actual scene object name
+            obj = self._resolve_object_name(intent.target_objects[0], scene)
+        if not obj:
+            obj = affordance.recommended_object
         if not obj:
             return self._plan_fallback(intent, "Cannot determine target object")
 
@@ -301,6 +417,23 @@ class Planner:
             risk_level="low",
             reasoning="Generic pick-and-place plan.",
         )
+
+    def _resolve_object_name(self, target: str, scene: SceneState) -> str | None:
+        """Resolve a partial object name to an actual scene object name."""
+        target_lower = target.lower()
+        for obj in scene.objects:
+            name_lower = obj.name.lower()
+            cat_lower = obj.category.lower()
+            # Exact match
+            if target_lower == name_lower:
+                return obj.name
+            # Partial match (e.g. "apple" matches "apple_01")
+            if target_lower in name_lower or target_lower in cat_lower:
+                return obj.name
+            # Handle compound names like "red_cube"
+            if name_lower.startswith(target_lower):
+                return obj.name
+        return None
 
     def _plan_fallback(self, intent: UserIntent, reason: str) -> ExecutionPlan:
         """Fallback when planning fails."""
