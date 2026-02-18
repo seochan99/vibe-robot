@@ -96,6 +96,14 @@ class MuJoCoEnv:
         self._captured_frames: list[np.ndarray] = []
         self._capture_width: int = 320
         self._capture_height: int = 240
+        # Interactive free camera state used by MJPEG rendering.
+        self._camera = mujoco.MjvCamera()
+        mujoco.mjv_defaultCamera(self._camera)
+        self._camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+        self._camera.azimuth = 120.0
+        self._camera.elevation = -22.0
+        self._camera.distance = 2.0
+        self._camera.lookat[:] = np.array([0.45, 0.0, 0.35], dtype=float)
 
     def reset(self, qpos: Optional[np.ndarray] = None) -> SimState:
         """Reset simulation to initial or specified state."""
@@ -254,8 +262,202 @@ class MuJoCoEnv:
         """Render the scene to an RGB image (offscreen)."""
         with self._lock:
             renderer = self._get_thread_renderer(width, height)
-            renderer.update_scene(self.data)
+            renderer.update_scene(self.data, camera=self._camera)
             return renderer.render()
+
+    def get_camera_state(self) -> dict:
+        """Get current free-camera parameters."""
+        with self._lock:
+            return {
+                "azimuth": float(self._camera.azimuth),
+                "elevation": float(self._camera.elevation),
+                "distance": float(self._camera.distance),
+                "lookat": [float(v) for v in self._camera.lookat],
+            }
+
+    def set_camera_state(
+        self,
+        azimuth: Optional[float] = None,
+        elevation: Optional[float] = None,
+        distance: Optional[float] = None,
+        lookat: Optional[np.ndarray] = None,
+    ) -> dict:
+        """Set free-camera parameters with safe clamping."""
+        with self._lock:
+            if azimuth is not None:
+                self._camera.azimuth = float(azimuth)
+            if elevation is not None:
+                self._camera.elevation = float(np.clip(elevation, -89.0, 89.0))
+            if distance is not None:
+                self._camera.distance = float(np.clip(distance, 0.4, 6.0))
+            if lookat is not None and len(lookat) == 3:
+                lookat_arr = np.asarray(lookat, dtype=float).copy()
+                for i, axis in enumerate(("x", "y", "z")):
+                    lo, hi = WORKSPACE_BOUNDS[axis]
+                    margin = 0.35 if axis != "z" else 0.4
+                    lookat_arr[i] = np.clip(lookat_arr[i], lo - margin, hi + margin)
+                self._camera.lookat[:] = lookat_arr
+            return self.get_camera_state()
+
+    def set_object_pos(self, name: str, pos: np.ndarray) -> bool:
+        """Move a free-body object directly without rebuilding the whole scene."""
+        with self._lock:
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if body_id < 0:
+                return False
+
+            jnt_id = self.model.body_jntadr[body_id]
+            if jnt_id < 0 or self.model.jnt_type[jnt_id] != mujoco.mjtJoint.mjJNT_FREE:
+                return False
+
+            qpos_adr = self.model.jnt_qposadr[jnt_id]
+            self.data.qpos[qpos_adr:qpos_adr + 3] = np.asarray(pos, dtype=float)[:3]
+            self.data.qvel[self.model.jnt_dofadr[jnt_id]:self.model.jnt_dofadr[jnt_id] + 6] = 0.0
+            mujoco.mj_forward(self.model, self.data)
+            return True
+
+    def project_screen_to_plane(
+        self,
+        nx: float,
+        ny: float,
+        plane_z: float = 0.35,
+        aspect: float = 4.0 / 3.0,
+    ) -> Optional[np.ndarray]:
+        """Project normalized screen coord to a world point on z=plane_z."""
+        with self._lock:
+            nx = float(np.clip(nx, 0.0, 1.0))
+            ny = float(np.clip(ny, 0.0, 1.0))
+            az = np.deg2rad(float(self._camera.azimuth))
+            el = np.deg2rad(float(self._camera.elevation))
+            dist = max(0.4, float(self._camera.distance))
+            lookat = np.array(self._camera.lookat, dtype=float)
+
+            # Direction from camera position toward lookat.
+            forward = np.array(
+                [np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)],
+                dtype=float,
+            )
+            cam_pos = lookat - forward * dist
+
+            world_up = np.array([0.0, 0.0, 1.0], dtype=float)
+            right = np.cross(forward, world_up)
+            right_norm = float(np.linalg.norm(right))
+            if right_norm < 1e-6:
+                right = np.array([1.0, 0.0, 0.0], dtype=float)
+            else:
+                right /= right_norm
+            up = np.cross(right, forward)
+            up /= max(1e-6, float(np.linalg.norm(up)))
+
+            x_ndc = (nx - 0.5) * 2.0
+            y_ndc = (0.5 - ny) * 2.0
+            fovy_rad = np.deg2rad(float(self.model.vis.global_.fovy))
+            tan_half = np.tan(fovy_rad * 0.5)
+
+            ray = forward + right * x_ndc * tan_half * aspect + up * y_ndc * tan_half
+            ray_norm = float(np.linalg.norm(ray))
+            if ray_norm < 1e-9:
+                return None
+            ray /= ray_norm
+
+            if abs(ray[2]) < 1e-7:
+                return None
+            t = (float(plane_z) - cam_pos[2]) / ray[2]
+            if t <= 0.0:
+                return None
+            return cam_pos + ray * t
+
+    def project_world_to_screen(
+        self,
+        world_pos: np.ndarray,
+        aspect: float = 4.0 / 3.0,
+    ) -> Optional[tuple[float, float, float]]:
+        """Project world point to normalized screen coord and depth."""
+        with self._lock:
+            az = np.deg2rad(float(self._camera.azimuth))
+            el = np.deg2rad(float(self._camera.elevation))
+            dist = max(0.4, float(self._camera.distance))
+            lookat = np.array(self._camera.lookat, dtype=float)
+
+            forward = np.array(
+                [np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)],
+                dtype=float,
+            )
+            cam_pos = lookat - forward * dist
+
+            world_up = np.array([0.0, 0.0, 1.0], dtype=float)
+            right = np.cross(forward, world_up)
+            right_norm = float(np.linalg.norm(right))
+            if right_norm < 1e-6:
+                right = np.array([1.0, 0.0, 0.0], dtype=float)
+            else:
+                right /= right_norm
+            up = np.cross(right, forward)
+            up /= max(1e-6, float(np.linalg.norm(up)))
+
+            rel = np.asarray(world_pos, dtype=float) - cam_pos
+            depth = float(np.dot(rel, forward))
+            if depth <= 1e-6:
+                return None
+
+            x_cam = float(np.dot(rel, right))
+            y_cam = float(np.dot(rel, up))
+            fovy_rad = np.deg2rad(float(self.model.vis.global_.fovy))
+            tan_half = np.tan(fovy_rad * 0.5)
+            x_ndc = x_cam / (depth * tan_half * max(1e-6, float(aspect)))
+            y_ndc = y_cam / (depth * tan_half)
+
+            nx = 0.5 + x_ndc * 0.5
+            ny = 0.5 - y_ndc * 0.5
+            return float(nx), float(ny), depth
+
+    def pick_object_from_screen(
+        self,
+        object_names: list[str],
+        nx: float,
+        ny: float,
+        aspect: float = 4.0 / 3.0,
+        pick_radius: float = 0.08,
+    ) -> Optional[dict]:
+        """Pick the nearest visible object to a screen coord."""
+        with self._lock:
+            nx = float(np.clip(nx, 0.0, 1.0))
+            ny = float(np.clip(ny, 0.0, 1.0))
+            radius = max(0.005, float(pick_radius))
+
+            best = None
+            for name in object_names:
+                body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+                if body_id < 0:
+                    continue
+                pos = self.data.xpos[body_id].copy()
+                screen = self.project_world_to_screen(pos, aspect=aspect)
+                if screen is None:
+                    continue
+                sx, sy, depth = screen
+                dist = float(np.hypot(sx - nx, sy - ny))
+                if dist > radius:
+                    continue
+
+                if best is None:
+                    best = (name, pos, sx, sy, dist, depth)
+                    continue
+
+                _, _, _, _, best_dist, best_depth = best
+                if dist < best_dist or (abs(dist - best_dist) < 1e-6 and depth < best_depth):
+                    best = (name, pos, sx, sy, dist, depth)
+
+            if best is None:
+                return None
+
+            name, pos, sx, sy, dist, depth = best
+            return {
+                "name": name,
+                "position": [float(pos[0]), float(pos[1]), float(pos[2])],
+                "screen": [float(sx), float(sy)],
+                "distance": float(dist),
+                "depth": float(depth),
+            }
 
     def _get_thread_renderer(self, width: int, height: int):
         """Get or create a renderer bound to the current thread."""

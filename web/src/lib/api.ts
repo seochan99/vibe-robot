@@ -261,6 +261,21 @@ export interface SceneObjectInfo {
   [key: string]: unknown;
 }
 
+export interface SimCameraState {
+  azimuth: number;
+  elevation: number;
+  distance: number;
+  lookat: [number, number, number];
+}
+
+export interface PickedSimObject {
+  name: string;
+  position: [number, number, number];
+  screen: [number, number];
+  distance: number;
+  depth: number;
+}
+
 export async function fetchSceneObjects(): Promise<SceneObjectInfo[]> {
   try {
     const res = await fetch(`${API_BASE}/api/scene/objects`);
@@ -311,6 +326,62 @@ export async function removeSceneObject(name: string): Promise<{ status: string 
 
 export function getSimStreamUrl(): string {
   return `${API_BASE}/api/sim/stream`;
+}
+
+export async function fetchSimCamera(): Promise<SimCameraState> {
+  const res = await fetch(`${API_BASE}/api/sim/camera`);
+  if (!res.ok) throw new Error(`Camera fetch error: ${res.status}`);
+  const data = await res.json();
+  return data.camera as SimCameraState;
+}
+
+export async function updateSimCamera(
+  patch: Partial<SimCameraState>,
+): Promise<SimCameraState> {
+  const res = await fetch(`${API_BASE}/api/sim/camera`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(`Camera update error: ${res.status}`);
+  const data = await res.json();
+  return data.camera as SimCameraState;
+}
+
+export async function projectSimToWorld(
+  nx: number,
+  ny: number,
+  plane_z = 0.35,
+  aspect = 4 / 3,
+): Promise<[number, number, number]> {
+  const res = await fetch(`${API_BASE}/api/sim/project`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nx, ny, plane_z, aspect }),
+  });
+  if (!res.ok) throw new Error(`Projection error: ${res.status}`);
+  const data = await res.json();
+  if (data.status !== "ok" || !Array.isArray(data.point)) {
+    throw new Error(data.error || "projection_failed");
+  }
+  return data.point as [number, number, number];
+}
+
+export async function pickSimObject(
+  nx: number,
+  ny: number,
+  aspect = 4 / 3,
+  radius = 0.08,
+): Promise<PickedSimObject | null> {
+  const res = await fetch(`${API_BASE}/api/sim/pick-object`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nx, ny, aspect, radius }),
+  });
+  if (!res.ok) throw new Error(`Pick object error: ${res.status}`);
+  const data = await res.json();
+  if (data.status !== "ok") return null;
+  return data.object as PickedSimObject;
 }
 
 // Auth is now handled client-side via chatgpt-oauth.ts (device code flow)

@@ -24,6 +24,10 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.pipeline import PipelineResult, PipelineStage, VibeRobotPipeline
+from api.context_resolver import (
+    _analyze_command_context,
+    _build_context_hint,
+)
 from simulator.franka_controller import FrankaController
 from simulator.mujoco_env import MuJoCoEnv
 from simulator.scene_builder import (
@@ -34,6 +38,7 @@ from simulator.scene_builder import (
 )
 from study.logger import InteractionLogger
 from ui.failure_cards import FailureCardGenerator
+from config import WORKSPACE_BOUNDS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,6 +72,10 @@ class AppState:
         self.scene_name: str = ""
         self.last_target_object: Optional[str] = None
         self.retry_count: int = 0
+        self.last_command: Optional[str] = None
+        self.last_plan_description: Optional[str] = None
+        self.last_failure_summary: Optional[str] = None
+        self.turn_history: list[dict] = []
         self.logger = InteractionLogger()
         self.failure_gen = FailureCardGenerator()
 
@@ -74,12 +83,21 @@ class AppState:
         self.scene_name = scene_name
         self.last_target_object = None
         self.retry_count = 0
+        self.last_command = None
+        self.last_plan_description = None
+        self.last_failure_summary = None
+        self.turn_history = []
         objects = TASK_PRESETS.get(scene_name, TASK_PRESETS["wind_paper"])
         xml = build_scene_xml(objects, include_wind="wind" in scene_name)
         env = MuJoCoEnv(xml_string=xml)
         controller = FrankaController(env)
         env.reset()
         self.pipeline = VibeRobotPipeline(env, controller, scene_objects=objects)
+
+    def append_history(self, entry: dict):
+        self.turn_history.append(entry)
+        # Keep recent context compact.
+        self.turn_history = self.turn_history[-12:]
 
 
 state = AppState()
@@ -96,92 +114,6 @@ class CommandRequest(BaseModel):
     account_id: Optional[str] = None
 
 
-_RETRY_WORDS = (
-    "다시",
-    "또",
-    "지금도",
-    "여전히",
-    "아니",
-    "실패",
-    "넘어",
-    "떨어",
-    "제대로",
-    "안돼",
-    "고쳐",
-    "개선",
-    "retry",
-    "again",
-    "still",
-    "failed",
-    "fix",
-    "improve",
-    "re-grasp",
-)
-
-_OBJECT_HINTS = {
-    "사과": "apple",
-    "바나나": "banana",
-    "오렌지": "orange",
-    "컵": "cup",
-    "책": "book",
-    "종이": "paper",
-    "펜": "pen",
-    "큐브": "cube",
-}
-
-
-def _is_retry_feedback(command: str) -> bool:
-    cmd = command.lower()
-    return any(word in cmd for word in _RETRY_WORDS)
-
-
-def _command_mentions_object(command: str, scene_objects: list[SceneObject]) -> bool:
-    cmd = command.lower()
-
-    # Explicit Korean/English object mentions
-    for ko, en in _OBJECT_HINTS.items():
-        if ko in cmd or en in cmd:
-            return True
-
-    # Scene object names or base names (e.g. banana_01 -> banana)
-    for obj in scene_objects:
-        name = obj.name.lower()
-        if name in cmd:
-            return True
-        base = name.split("_")[0]
-        if base and base in cmd:
-            return True
-        obj_type = obj.obj_type.lower()
-        if obj_type in cmd:
-            return True
-
-    return False
-
-
-def _build_context_hint(
-    command: str,
-    scene_objects: list[SceneObject],
-    last_target_object: Optional[str],
-    retry_count: int = 0,
-) -> Optional[str]:
-    """Create retry context so follow-up commands keep the same target object."""
-    if not last_target_object:
-        return None
-    if _command_mentions_object(command, scene_objects):
-        return None
-    if not _is_retry_feedback(command):
-        return None
-
-    return (
-        f'Previous attempt target object: "{last_target_object}". '
-        f"Retry attempt count on this target: {max(1, retry_count + 1)}. "
-        "User is asking for a retry/improvement on the same target. "
-        "Keep this same target unless the user explicitly names a different object. "
-        "Prioritize stable grasp (no tipping), vertical top-down approach, and "
-        "controlled two-stage vertical lift with hold verification."
-    )
-
-
 def _infer_primary_target(result: PipelineResult) -> Optional[str]:
     if not result.plan:
         return None
@@ -189,6 +121,16 @@ def _infer_primary_target(result: PipelineResult) -> Optional[str]:
         target = (step.target or "").strip()
         if target and target != "held_object":
             return target
+    return None
+
+
+def _summarize_execution_issue(result: PipelineResult) -> Optional[str]:
+    if result.error:
+        return result.error
+    failed = [r for r in result.execution_results if not r.get("success", True)]
+    if failed:
+        head = failed[0]
+        return f"{head.get('action')}({head.get('target')}): {head.get('message')}"
     return None
 
 
@@ -206,21 +148,13 @@ async def run_command(req: CommandRequest):
     logger.info("/api/command scene=%s model=%s", req.scene, req.model)
     if state.pipeline is None or state.scene_name != req.scene:
         state.init_pipeline(req.scene)
+    if state.pipeline is not None:
+        state.pipeline.sync_scene_objects_from_env()
 
     state.logger.log_command(req.command)
     conditions = ["wind_present"] if "wind" in req.scene else []
-    context_hint = _build_context_hint(
-        req.command,
-        state.pipeline._scene_objects if state.pipeline else [],
-        state.last_target_object,
-        state.retry_count,
-    )
-    preferred_target = state.last_target_object if context_hint else None
-    if context_hint:
-        logger.info("Applying retry context for target=%s", state.last_target_object)
-
-    loop = asyncio.get_event_loop()
-
+    scene_objects = state.pipeline._scene_objects if state.pipeline else []
+    provider = None
     if req.model != "rule_based" and req.access_token:
         from providers.chatgpt_provider import ChatGPTOAuthProvider
 
@@ -230,6 +164,36 @@ async def run_command(req: CommandRequest):
             model=req.model,
         )
 
+    decision = await _analyze_command_context(
+        command=req.command,
+        scene_objects=scene_objects,
+        last_target_object=state.last_target_object,
+        retry_count=state.retry_count,
+        last_failure_summary=state.last_failure_summary,
+        last_plan_description=state.last_plan_description,
+        turn_history=state.turn_history,
+        provider=provider,
+    )
+    context_hint = _build_context_hint(
+        scene_objects=scene_objects,
+        last_target_object=state.last_target_object,
+        decision=decision,
+        retry_count=state.retry_count,
+        last_failure_summary=state.last_failure_summary,
+    )
+    preferred_target = decision.resolved_target or (
+        state.last_target_object if decision.lock_previous_target else None
+    )
+    if context_hint:
+        logger.info(
+            "Applying context hint target=%s source=%s",
+            preferred_target,
+            decision.source,
+        )
+
+    loop = asyncio.get_event_loop()
+
+    if provider is not None:
         async def _run_async():
             return await state.pipeline.run_async(
                 req.command,
@@ -254,12 +218,28 @@ async def run_command(req: CommandRequest):
         )
 
     state.current_result = result
+    state.last_command = req.command
+    state.last_plan_description = result.plan.plan_description if result.plan else None
     prev_target = state.last_target_object
     target = _infer_primary_target(result)
     if target:
         state.last_target_object = target
         if prev_target != target:
             state.retry_count = 0
+    issue = _summarize_execution_issue(result)
+    if result.stage == PipelineStage.FAILED and issue:
+        state.last_failure_summary = issue
+    elif not decision.is_retry_feedback:
+        state.last_failure_summary = None
+    state.append_history(
+        {
+            "ts": time.time(),
+            "stage": result.stage.value,
+            "command": req.command,
+            "target": target or preferred_target,
+            "note": issue or result.error or (result.plan.plan_description if result.plan else ""),
+        }
+    )
     logger.info("/api/command done stage=%s error=%s", result.stage.value, result.error)
     return _serialize_result(result)
 
@@ -273,20 +253,57 @@ async def run_command_stream(req: CommandRequest):
     logger.info("/api/command/stream start scene=%s model=%s", req.scene, req.model)
     if state.pipeline is None or state.scene_name != req.scene:
         state.init_pipeline(req.scene)
+    if state.pipeline is not None:
+        state.pipeline.sync_scene_objects_from_env()
 
     state.logger.log_command(req.command)
     conditions = ["wind_present"] if "wind" in req.scene else []
-    context_hint = _build_context_hint(
-        req.command,
-        state.pipeline._scene_objects if state.pipeline else [],
-        state.last_target_object,
-        state.retry_count,
+    scene_objects = state.pipeline._scene_objects if state.pipeline else []
+    provider = None
+    if req.model != "rule_based" and req.access_token:
+        from providers.chatgpt_provider import ChatGPTOAuthProvider
+
+        provider = ChatGPTOAuthProvider(
+            access_token=req.access_token,
+            account_id=req.account_id or "",
+            model=req.model,
+        )
+
+    decision = await _analyze_command_context(
+        command=req.command,
+        scene_objects=scene_objects,
+        last_target_object=state.last_target_object,
+        retry_count=state.retry_count,
+        last_failure_summary=state.last_failure_summary,
+        last_plan_description=state.last_plan_description,
+        turn_history=state.turn_history,
+        provider=provider,
     )
-    preferred_target = state.last_target_object if context_hint else None
+    context_hint = _build_context_hint(
+        scene_objects=scene_objects,
+        last_target_object=state.last_target_object,
+        decision=decision,
+        retry_count=state.retry_count,
+        last_failure_summary=state.last_failure_summary,
+    )
+    preferred_target = decision.resolved_target or (
+        state.last_target_object if decision.lock_previous_target else None
+    )
     if context_hint:
-        logger.info("Applying retry context for target=%s", state.last_target_object)
+        logger.info(
+            "Applying context hint target=%s source=%s",
+            preferred_target,
+            decision.source,
+        )
 
     stage_queue: queue.Queue = queue.Queue()
+    if decision.reason and preferred_target:
+        stage_queue.put(
+            {
+                "stage": "reference_resolution",
+                "message": f'Resolved reference to "{preferred_target}"',
+            }
+        )
 
     def on_stage(stage: str, message: str, _result):
         stage_queue.put({"stage": stage, "message": message})
@@ -298,15 +315,7 @@ async def run_command_stream(req: CommandRequest):
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-    if req.model != "rule_based" and req.access_token:
-        from providers.chatgpt_provider import ChatGPTOAuthProvider
-
-        provider = ChatGPTOAuthProvider(
-            access_token=req.access_token,
-            account_id=req.account_id or "",
-            model=req.model,
-        )
-
+    if provider is not None:
         async def _run_async():
             return await state.pipeline.run_async(
                 req.command,
@@ -370,12 +379,30 @@ async def run_command_stream(req: CommandRequest):
             try:
                 result = future.result()
                 state.current_result = result
+                state.last_command = req.command
+                state.last_plan_description = (
+                    result.plan.plan_description if result.plan else None
+                )
                 prev_target = state.last_target_object
                 target = _infer_primary_target(result)
                 if target:
                     state.last_target_object = target
                     if prev_target != target:
                         state.retry_count = 0
+                issue = _summarize_execution_issue(result)
+                if result.stage == PipelineStage.FAILED and issue:
+                    state.last_failure_summary = issue
+                elif not decision.is_retry_feedback:
+                    state.last_failure_summary = None
+                state.append_history(
+                    {
+                        "ts": time.time(),
+                        "stage": result.stage.value,
+                        "command": req.command,
+                        "target": target or preferred_target,
+                        "note": issue or result.error or (result.plan.plan_description if result.plan else ""),
+                    }
+                )
                 serialized = _serialize_result(result)
                 logger.info(
                     "/api/command/stream done stage=%s error=%s",
@@ -412,7 +439,26 @@ async def approve_execution():
         state.current_result,
     )
     state.current_result = result
-    state.retry_count = 0
+    state.last_plan_description = result.plan.plan_description if result.plan else None
+    target = _infer_primary_target(result)
+    if target:
+        state.last_target_object = target
+    issue = _summarize_execution_issue(result)
+    if issue:
+        state.last_failure_summary = issue
+        state.retry_count += 1
+    else:
+        state.last_failure_summary = None
+        state.retry_count = 0
+    state.append_history(
+        {
+            "ts": time.time(),
+            "stage": "approved_execution",
+            "command": state.last_command or "(approve)",
+            "target": target,
+            "note": issue or "Execution completed",
+        }
+    )
     state.logger.log_execution_result(result.execution_results)
 
     return {
@@ -432,6 +478,21 @@ def reject_execution():
             if state.last_target_object != target:
                 state.retry_count = 0
             state.last_target_object = target
+        if state.current_result.plan:
+            desc = state.current_result.plan.plan_description
+            tgt = target or "unknown target"
+            state.last_failure_summary = (
+                f'User rejected preview for "{tgt}". Planned behavior: {desc}'
+            )
+            state.append_history(
+                {
+                    "ts": time.time(),
+                    "stage": "rejected_preview",
+                    "command": state.last_command or "(reject)",
+                    "target": tgt,
+                    "note": desc,
+                }
+            )
         state.retry_count += 1
     state.current_result = None
     return {"status": "rejected"}
@@ -522,6 +583,27 @@ class MoveObjectRequest(BaseModel):
 
 class RemoveObjectRequest(BaseModel):
     name: str
+
+
+class SimCameraRequest(BaseModel):
+    azimuth: Optional[float] = None
+    elevation: Optional[float] = None
+    distance: Optional[float] = None
+    lookat: Optional[list[float]] = None
+
+
+class SimProjectRequest(BaseModel):
+    nx: float
+    ny: float
+    plane_z: float = 0.35
+    aspect: float = 4.0 / 3.0
+
+
+class SimPickRequest(BaseModel):
+    nx: float
+    ny: float
+    aspect: float = 4.0 / 3.0
+    radius: float = 0.08
 
 
 # ── Scene management routes ─────────────────────────────────────────────────
@@ -649,8 +731,18 @@ def scene_move_object(req: MoveObjectRequest):
 
     for obj in state.pipeline._scene_objects:
         if obj.name == req.name:
-            obj.pos = tuple(req.position[:3])
-            _rebuild_env()
+            target = np.asarray(req.position[:3], dtype=float)
+            # Keep object motion inside workspace bounds to avoid odd teleports.
+            for i, axis in enumerate(("x", "y", "z")):
+                lo, hi = WORKSPACE_BOUNDS[axis]
+                target[i] = float(np.clip(target[i], lo, hi))
+            obj.pos = tuple(target.tolist())
+
+            moved = False
+            if state.pipeline.env is not None:
+                moved = state.pipeline.env.set_object_pos(req.name, target)
+            if not moved:
+                _rebuild_env()
             return {"status": "ok"}
 
     return {"status": "error", "error": f"Object '{req.name}' not found"}
@@ -679,13 +771,95 @@ def _rebuild_env():
     """Rebuild MuJoCo env from current scene objects."""
     if state.pipeline is None:
         return
+    previous_camera = None
+    if state.pipeline.env is not None:
+        try:
+            previous_camera = state.pipeline.env.get_camera_state()
+        except Exception:
+            previous_camera = None
+
     objects = state.pipeline._scene_objects
     xml = build_scene_xml(objects, include_wind="wind" in state.scene_name)
     env = MuJoCoEnv(xml_string=xml)
     controller = FrankaController(env)
     env.reset()
+    if previous_camera:
+        env.set_camera_state(
+            azimuth=previous_camera.get("azimuth"),
+            elevation=previous_camera.get("elevation"),
+            distance=previous_camera.get("distance"),
+            lookat=previous_camera.get("lookat"),
+        )
     state.pipeline.env = env
     state.pipeline.controller = controller
+
+
+# ── Interactive camera / projection ─────────────────────────────────────────
+
+
+@app.get("/api/sim/camera")
+def sim_get_camera():
+    """Get current simulation free-camera state."""
+    if state.pipeline is None:
+        state.init_pipeline(state.scene_name or "wind_paper")
+    return {"camera": state.pipeline.env.get_camera_state()}
+
+
+@app.post("/api/sim/camera")
+def sim_set_camera(req: SimCameraRequest):
+    """Update simulation free-camera state."""
+    if state.pipeline is None:
+        state.init_pipeline(state.scene_name or "wind_paper")
+    camera = state.pipeline.env.set_camera_state(
+        azimuth=req.azimuth,
+        elevation=req.elevation,
+        distance=req.distance,
+        lookat=req.lookat,
+    )
+    return {"status": "ok", "camera": camera}
+
+
+@app.post("/api/sim/project")
+def sim_project_to_world(req: SimProjectRequest):
+    """Project normalized screen coordinate onto tabletop plane."""
+    if state.pipeline is None:
+        state.init_pipeline(state.scene_name or "wind_paper")
+    point = state.pipeline.env.project_screen_to_plane(
+        req.nx,
+        req.ny,
+        plane_z=req.plane_z,
+        aspect=max(0.25, float(req.aspect)),
+    )
+    if point is None:
+        return {"status": "error", "error": "projection_failed"}
+
+    for i, axis in enumerate(("x", "y", "z")):
+        lo, hi = WORKSPACE_BOUNDS[axis]
+        point[i] = np.clip(point[i], lo, hi)
+    return {"status": "ok", "point": [float(point[0]), float(point[1]), float(point[2])]}
+
+
+@app.post("/api/sim/pick-object")
+def sim_pick_object(req: SimPickRequest):
+    """Pick nearest movable object from screen coordinate."""
+    if state.pipeline is None:
+        state.init_pipeline(state.scene_name or "wind_paper")
+
+    movable_names = [
+        obj.name
+        for obj in state.pipeline._scene_objects
+        if not obj.properties.get("fixed", False)
+    ]
+    picked = state.pipeline.env.pick_object_from_screen(
+        movable_names,
+        req.nx,
+        req.ny,
+        aspect=max(0.25, float(req.aspect)),
+        pick_radius=max(0.005, float(req.radius)),
+    )
+    if not picked:
+        return {"status": "none"}
+    return {"status": "ok", "object": picked}
 
 
 # ── MJPEG streaming ─────────────────────────────────────────────────────────
@@ -725,7 +899,7 @@ async def sim_stream():
                 await asyncio.sleep(0.5)
                 continue
 
-            await asyncio.sleep(0.1)  # ~10fps
+            await asyncio.sleep(0.05)  # ~20fps for smoother interactive camera control
 
     return StreamingResponse(
         generate(),

@@ -6,6 +6,7 @@ import type {
   AIModel,
   ExecutionResponse,
   PipelineResponse,
+  SimCameraState,
   SceneObjectInfo,
 } from "@/lib/api";
 import {
@@ -15,7 +16,12 @@ import {
   initScene,
   fetchSceneObjects,
   addSceneObject,
+  moveSceneObject,
   removeSceneObject,
+  fetchSimCamera,
+  pickSimObject,
+  projectSimToWorld,
+  updateSimCamera,
   getSimStreamUrl,
 } from "@/lib/api";
 import type { AuthStatus } from "@/lib/chatgpt-oauth";
@@ -28,6 +34,13 @@ import {
   loadTokens,
   refreshAccessToken,
 } from "@/lib/chatgpt-oauth";
+import { formatExecution, formatSummary } from "./chat-format";
+import { MarkdownLite } from "./markdown-lite";
+import { formatElapsed, clamp, msgId, projectViewToPlane } from "./page-helpers";
+import { PipelineDetails } from "./pipeline-details";
+import { SimulationPanel } from "./simulation-panel";
+import { CHATGPT_MODELS, FALLBACK_MODELS, SCENES } from "./ui-constants";
+import type { SimTool } from "./ui-constants";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,145 +55,22 @@ interface ChatMessage {
   timestamp: number;
 }
 
-const FALLBACK_MODELS: AIModel[] = [
-  { id: "rule_based", name: "Rule-Based (No AI)", requires_auth: false },
-];
-
-const CHATGPT_MODELS: AIModel[] = [
-  { id: "rule_based", name: "Rule-Based (No AI)", requires_auth: false },
-  { id: "gpt-4o", name: "GPT-4o", requires_auth: true },
-  { id: "o3", name: "o3", requires_auth: true },
-  { id: "o4-mini", name: "o4-mini", requires_auth: true },
-];
-
-const SCENES = [
-  { id: "wind_paper", label: "Wind & Papers", desc: "Papers blowing on a desk with a book nearby." },
-  { id: "pick_and_place", label: "Pick & Place", desc: "Move the red cube to the blue bin." },
-  { id: "sorting", label: "Fruit Sorting", desc: "Sort three fruits into a container." },
-];
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function msgId() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
-
-function formatElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}m ${s}s`;
-}
-
-/** One-line summary shown above the preview */
-function formatSummary(p: PipelineResponse): string {
-  if (p.error) return p.error;
-  if (p.plan) return p.plan.plan_description;
-  if (p.intent) return p.intent.intended_meaning;
-  return "Processing...";
-}
-
-/** Check if the response likely came from GPT (has substantive reasoning text) */
-function isGptResponse(p: PipelineResponse): boolean {
-  const intentReasoning = p.intent?.reasoning || "";
-  const planReasoning = p.plan?.reasoning || "";
-  // Rule-based responses have empty or very short reasoning
-  return intentReasoning.length > 30 || planReasoning.length > 30;
-}
-
-/** Detailed breakdown (shown in expandable section) */
-function formatDetails(p: PipelineResponse): string {
-  const parts: string[] = [];
-  const gpt = isGptResponse(p);
-
-  // GPT reasoning — shown first and prominently when available
-  if (gpt) {
-    let reasoning = "**AI Reasoning**\n";
-    if (p.intent?.reasoning) {
-      reasoning += `> ${p.intent.reasoning}\n`;
+type DragState =
+  | {
+      mode: "camera_orbit" | "camera_pan";
+      lastX: number;
+      lastY: number;
     }
-    if (p.plan?.reasoning && p.plan.reasoning !== p.intent?.reasoning) {
-      reasoning += `\n> ${p.plan.reasoning}`;
-    }
-    parts.push(reasoning);
-  }
-
-  if (p.intent) {
-    const conf = Math.round(p.intent.confidence * 100);
-    parts.push(
-      `**Intent Analysis**\n` +
-        `You said: "${p.intent.raw_command}"\n` +
-        `Meaning: ${p.intent.intended_meaning}\n` +
-        `Goal: ${p.intent.immediate_goal}\n` +
-        `Deep goal: ${p.intent.deep_goal}\n` +
-        `Targets: ${p.intent.target_objects.join(", ") || "auto"}\n` +
-        `Constraints: ${p.intent.implicit_constraints.join(", ")}\n` +
-        `Confidence: ${conf}%`
-    );
-  }
-
-  if (p.affordance) {
-    const a = p.affordance;
-    let s = "**Affordance Analysis**\n";
-    if (a.recommended_object) {
-      s += `Recommended: **${a.recommended_object}** (${a.recommended_affordance})\n`;
-    }
-    for (const oa of a.objects) {
-      const active = oa.active_affordances
-        .slice(0, 3)
-        .map((af) => `${af.name} (${Math.round(af.score * 100)}%)`)
-        .join(", ");
-      if (active) s += `- ${oa.object_name}: ${active}\n`;
-    }
-    if (a.reasoning) s += `\n> ${a.reasoning}`;
-    parts.push(s);
-  }
-
-  if (p.plan) {
-    const steps = p.plan.steps
-      .map((st, i) => `${i + 1}. \`${st.action}(${st.target})\` — ${st.description || ""}`)
-      .join("\n");
-    let planSection = `**Plan Steps**\n${steps}\n\nDuration: ~${p.plan.estimated_duration}s | Risk: ${p.plan.risk_level}`;
-    // Non-GPT reasoning (rule-based) — show inline if it exists and wasn't shown above
-    if (!gpt && p.plan.reasoning) {
-      planSection += `\n> ${p.plan.reasoning}`;
-    }
-    parts.push(planSection);
-  }
-
-  if (p.safety) {
-    const lines: string[] = [];
-    for (const c of p.safety.preconditions) lines.push(`[${c.severity}] ${c.description}`);
-    for (const c of p.safety.invariants) lines.push(`[${c.severity}] ${c.description}`);
-    for (const c of p.safety.tripwires) lines.push(`[tripwire] ${c.description}`);
-    lines.push(`Max speed: ${p.safety.limits.max_velocity_m_s} m/s | Max torque: ${p.safety.limits.max_torque_Nm} Nm`);
-    parts.push("**Safety Contract**\n" + lines.join("\n"));
-  }
-
-  return parts.join("\n\n");
-}
-
-function formatExecution(e: ExecutionResponse): string {
-  if (e.success) {
-    return "Done!";
-  }
-  return `Failed — ${e.error || "Unknown error"}`;
-}
-
-// ── Component ────────────────────────────────────────────────────────────────
-
-// ── Object palette for scene editor ──────────────────────────────────────────
-
-const OBJECT_PALETTE = [
-  { type: "book", label: "Book", icon: "\uD83D\uDCD6" },
-  { type: "cup", label: "Cup", icon: "\u2615" },
-  { type: "pen", label: "Pen", icon: "\uD83D\uDD8A" },
-  { type: "paper", label: "Paper", icon: "\uD83D\uDCC4" },
-  { type: "apple", label: "Apple", icon: "\uD83C\uDF4E" },
-  { type: "banana", label: "Banana", icon: "\uD83C\uDF4C" },
-  { type: "orange", label: "Orange", icon: "\uD83C\uDF4A" },
-  { type: "cube", label: "Cube", icon: "\uD83D\uDFE5" },
-];
+  | {
+      mode: "move";
+      lastX: number;
+      lastY: number;
+      objectName: string;
+      planeZ: number;
+      dragStartWorld: [number, number, number];
+      objectStartPos: [number, number, number];
+      objectPos: [number, number, number];
+    };
 
 export default function AppPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -200,6 +90,9 @@ export default function AppPage() {
   const [sceneObjects, setSceneObjects] = useState<SceneObjectInfo[]>([]);
   const [simConnected, setSimConnected] = useState(false);
   const [editorMode, setEditorMode] = useState<string | null>(null); // object type being placed
+  const [simTool, setSimTool] = useState<SimTool>("camera");
+  const [selectedObject, setSelectedObject] = useState<string | null>(null);
+  const [simCamera, setSimCamera] = useState<SimCameraState | null>(null);
   const [pipelineStage, setPipelineStage] = useState<string>("idle");
   const [requestStartedAt, setRequestStartedAt] = useState<number | null>(null);
   const [lastStreamAt, setLastStreamAt] = useState<number | null>(null);
@@ -209,6 +102,11 @@ export default function AppPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const simImgRef = useRef<HTMLImageElement>(null);
   const streamUiTickRef = useRef(0);
+  const dragRef = useRef<DragState | null>(null);
+  const simCameraRef = useRef<SimCameraState | null>(null);
+  const cameraPendingRef = useRef<SimCameraState | null>(null);
+  const cameraSyncingRef = useRef(false);
+  const moveSendAtRef = useRef(0);
 
   // Check auth (client-side) + fetch models on mount
   useEffect(() => {
@@ -229,10 +127,19 @@ export default function AppPage() {
   }, []);
 
   useEffect(() => {
+    setEditorMode(null);
+    setSimTool("camera");
+    setSelectedObject(null);
     initScene(scene)
-      .then(() => {
+      .then(async () => {
         setSimConnected(true);
         refreshSceneObjects();
+        try {
+          const camera = await fetchSimCamera();
+          setSimCamera(camera);
+        } catch {
+          setSimCamera(null);
+        }
       })
       .catch(() => setSimConnected(false));
   }, [scene, refreshSceneObjects]);
@@ -257,6 +164,10 @@ export default function AppPage() {
     const id = window.setInterval(() => setClockMs(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, [loading]);
+
+  useEffect(() => {
+    simCameraRef.current = simCamera;
+  }, [simCamera]);
 
   // Welcome message
   useEffect(() => {
@@ -297,6 +208,73 @@ export default function AppPage() {
     streamUiTickRef.current = now;
     setLastStreamAt(now);
   }, []);
+
+  const flushCameraSync = useCallback(async () => {
+    if (cameraSyncingRef.current) return;
+    cameraSyncingRef.current = true;
+    try {
+      while (cameraPendingRef.current) {
+        const next = cameraPendingRef.current;
+        cameraPendingRef.current = null;
+        try {
+          const applied = await updateSimCamera(next);
+          setSimCamera(applied);
+          simCameraRef.current = applied;
+        } catch {
+          // Keep local state and let user continue interacting.
+        }
+      }
+    } finally {
+      cameraSyncingRef.current = false;
+    }
+  }, []);
+
+  const queueCameraState = useCallback(
+    (next: SimCameraState) => {
+      setSimCamera(next);
+      simCameraRef.current = next;
+      cameraPendingRef.current = next;
+      void flushCameraSync();
+    },
+    [flushCameraSync],
+  );
+
+  const getImageNormalizedPoint = useCallback(
+    (clientX: number, clientY: number) => {
+      const img = simImgRef.current;
+      if (!img) return null;
+      const rect = img.getBoundingClientRect();
+      if (rect.width <= 1 || rect.height <= 1) return null;
+
+      const naturalW = img.naturalWidth || 640;
+      const naturalH = img.naturalHeight || 480;
+      const imageAspect = naturalW / naturalH;
+      const boxAspect = rect.width / rect.height;
+
+      let drawW = rect.width;
+      let drawH = rect.height;
+      let offX = 0;
+      let offY = 0;
+
+      if (boxAspect > imageAspect) {
+        drawW = rect.height * imageAspect;
+        offX = (rect.width - drawW) * 0.5;
+      } else {
+        drawH = rect.width / imageAspect;
+        offY = (rect.height - drawH) * 0.5;
+      }
+
+      const px = clientX - rect.left - offX;
+      const py = clientY - rect.top - offY;
+      if (px < 0 || py < 0 || px > drawW || py > drawH) return null;
+      return {
+        nx: px / drawW,
+        ny: py / drawH,
+        aspect: drawW / drawH,
+      };
+    },
+    [],
+  );
 
   // Listen for auth changes from popup callback page (storage event)
   useEffect(() => {
@@ -470,25 +448,19 @@ export default function AppPage() {
     setAuth({ authenticated: false });
   }, []);
 
-  // Scene editor: add object on sim view click
+  // Scene editor: add object at clicked image point (camera-aware projection)
   const handleSimClick = useCallback(
     async (e: React.MouseEvent<HTMLImageElement>) => {
-      if (!editorMode || !simImgRef.current) return;
-
-      const rect = simImgRef.current.getBoundingClientRect();
-      const nx = (e.clientX - rect.left) / rect.width; // 0..1
-      const ny = (e.clientY - rect.top) / rect.height; // 0..1
-
-      // Map pixel coords to approximate workspace coords
-      // Camera is ~120 azimuth, -20 elevation, centered ~(0.3, 0, 0.4)
-      const x = 0.2 + nx * 0.6; // x: 0.2..0.8
-      const y = (0.5 - ny) * 0.6; // rough y mapping
-      const z = 0.35; // desk surface height
+      if (!editorMode || loading) return;
+      const pt = getImageNormalizedPoint(e.clientX, e.clientY);
+      if (!pt) return;
 
       try {
+        const [x, y, z] = await projectSimToWorld(pt.nx, pt.ny, 0.35, pt.aspect);
         const result = await addSceneObject(editorMode, [x, y, z]);
         refreshSceneObjects();
         setEditorMode(null);
+        setSimTool("camera");
         addMessage({
           role: "system",
           content: `Added **${result.name}** to the scene.`,
@@ -500,8 +472,242 @@ export default function AppPage() {
         });
       }
     },
-    [editorMode, addMessage, refreshSceneObjects],
+    [editorMode, loading, getImageNormalizedPoint, addMessage, refreshSceneObjects],
   );
+
+  const handleSimPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      if (loading || editorMode) return;
+      e.preventDefault();
+
+      const isPan = e.button === 1 || e.button === 2 || e.shiftKey;
+      const clientX = e.clientX;
+      const clientY = e.clientY;
+      const pointerId = e.pointerId;
+      const target = e.currentTarget;
+
+      if (simTool !== "move" || isPan) {
+        dragRef.current = {
+          mode: isPan ? "camera_pan" : "camera_orbit",
+          lastX: clientX,
+          lastY: clientY,
+        };
+        target.setPointerCapture(pointerId);
+        return;
+      }
+
+      // Move tool: pick object directly from cursor, then drag immediately.
+      target.setPointerCapture(pointerId);
+      const startMove = async () => {
+        const cam = simCameraRef.current;
+        const pt = getImageNormalizedPoint(clientX, clientY);
+        if (!cam || !pt) {
+          if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+          return;
+        }
+
+        let objectName = selectedObject;
+        let objectPos: [number, number, number] | null = null;
+        try {
+          const picked = await pickSimObject(pt.nx, pt.ny, pt.aspect, 0.09);
+          if (picked) {
+            objectName = picked.name;
+            objectPos = picked.position;
+          }
+        } catch {
+          // Fall back to selected object in list.
+        }
+
+        if (!objectName) {
+          if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+          return;
+        }
+
+        if (!objectPos) {
+          const obj = sceneObjects.find((o) => o.name === objectName);
+          if (!obj) {
+            if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+            return;
+          }
+          objectPos = [...obj.position] as [number, number, number];
+        }
+
+        const dragStartWorld = projectViewToPlane(
+          pt.nx,
+          pt.ny,
+          cam,
+          objectPos[2],
+          pt.aspect,
+        );
+        if (!dragStartWorld) {
+          if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+          return;
+        }
+
+        setSelectedObject(objectName);
+        dragRef.current = {
+          mode: "move",
+          lastX: clientX,
+          lastY: clientY,
+          objectName,
+          planeZ: objectPos[2],
+          dragStartWorld,
+          objectStartPos: objectPos,
+          objectPos,
+        };
+      };
+      void startMove();
+    },
+    [loading, editorMode, simTool, selectedObject, sceneObjects, getImageNormalizedPoint],
+  );
+
+  const handleSimPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      const drag = dragRef.current;
+      if (!drag || loading) return;
+
+      const dx = e.clientX - drag.lastX;
+      const dy = e.clientY - drag.lastY;
+      drag.lastX = e.clientX;
+      drag.lastY = e.clientY;
+
+      if (drag.mode === "camera_orbit" || drag.mode === "camera_pan") {
+        const cam = simCameraRef.current;
+        if (!cam) return;
+
+        if (drag.mode === "camera_orbit") {
+          const next: SimCameraState = {
+            ...cam,
+            azimuth: cam.azimuth + dx * 0.55,
+            elevation: clamp(cam.elevation - dy * 0.42, -89, 89),
+          };
+          queueCameraState(next);
+          return;
+        }
+
+        const az = (cam.azimuth * Math.PI) / 180;
+        const right = [Math.cos(az), Math.sin(az)] as const;
+        const forward = [-Math.sin(az), Math.cos(az)] as const;
+        const scale = cam.distance * 0.0036;
+        const lx = cam.lookat[0] - dx * right[0] * scale + dy * forward[0] * scale;
+        const ly = cam.lookat[1] - dx * right[1] * scale + dy * forward[1] * scale;
+        const next: SimCameraState = {
+          ...cam,
+          lookat: [lx, ly, cam.lookat[2]],
+        };
+        queueCameraState(next);
+        return;
+      }
+
+      if (drag.mode !== "move") return;
+
+      // Move selected object using true view-plane projection delta.
+      const cam = simCameraRef.current;
+      if (!cam) return;
+      const pt = getImageNormalizedPoint(e.clientX, e.clientY);
+      if (!pt) return;
+      const world = projectViewToPlane(
+        pt.nx,
+        pt.ny,
+        cam,
+        drag.planeZ,
+        pt.aspect,
+      );
+      if (!world) return;
+
+      const nextPos: [number, number, number] = [
+        clamp(drag.objectStartPos[0] + (world[0] - drag.dragStartWorld[0]), 0.1, 0.9),
+        clamp(drag.objectStartPos[1] + (world[1] - drag.dragStartWorld[1]), -0.5, 0.5),
+        drag.objectStartPos[2],
+      ];
+      drag.objectPos = nextPos;
+
+      setSceneObjects((prev) =>
+        prev.map((o) => (o.name === drag.objectName ? { ...o, position: nextPos } : o)),
+      );
+
+      const now = Date.now();
+      if (now - moveSendAtRef.current > 90) {
+        moveSendAtRef.current = now;
+        void moveSceneObject(drag.objectName, nextPos);
+      }
+    },
+    [loading, queueCameraState, getImageNormalizedPoint],
+  );
+
+  const handleSimPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      const drag = dragRef.current;
+      if (drag?.mode === "move") {
+        void moveSceneObject(drag.objectName, drag.objectPos).then(() => {
+          refreshSceneObjects();
+        });
+      }
+      dragRef.current = null;
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    },
+    [refreshSceneObjects],
+  );
+
+  const handleSimContextMenu = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
+    e.preventDefault();
+  }, []);
+
+  const handleSimWheel = useCallback((e: React.WheelEvent<HTMLImageElement>) => {
+    if (editorMode || loading) return;
+    e.preventDefault();
+    const cam = simCameraRef.current;
+    if (!cam) return;
+    const zoom = Math.exp(e.deltaY * 0.0015);
+    const next: SimCameraState = {
+      ...cam,
+      distance: clamp(cam.distance * zoom, 0.4, 6.0),
+    };
+    queueCameraState(next);
+  }, [editorMode, loading, queueCameraState]);
+
+  const handleResetCamera = useCallback(async () => {
+    try {
+      const camera = await updateSimCamera({
+        azimuth: 120,
+        elevation: -22,
+        distance: 2.0,
+        lookat: [0.45, 0.0, 0.35],
+      });
+      setSimCamera(camera);
+      simCameraRef.current = camera;
+    } catch {
+      // keep UI usable even if camera reset fails
+    }
+  }, []);
+
+  const handleCancelEditor = useCallback(() => {
+    setEditorMode(null);
+    setSimTool("camera");
+  }, []);
+
+  const handleSelectTool = useCallback((tool: SimTool) => {
+    setSimTool(tool);
+    setEditorMode(null);
+  }, []);
+
+  const handleToggleAddMode = useCallback((objType: string) => {
+    if (editorMode === objType) {
+      setEditorMode(null);
+      setSimTool("camera");
+      return;
+    }
+    setEditorMode(objType);
+    setSimTool("add");
+  }, [editorMode]);
+
+  const handleSelectObject = useCallback((name: string) => {
+    setSelectedObject(name);
+    setSimTool("move");
+    setEditorMode(null);
+  }, []);
 
   // Scene editor: remove object
   const handleRemoveObject = useCallback(
@@ -509,6 +715,10 @@ export default function AppPage() {
       try {
         await removeSceneObject(name);
         refreshSceneObjects();
+        if (selectedObject === name) {
+          setSelectedObject(null);
+          setSimTool("camera");
+        }
         addMessage({ role: "system", content: `Removed **${name}** from the scene.` });
       } catch (err) {
         addMessage({
@@ -517,7 +727,7 @@ export default function AppPage() {
         });
       }
     },
-    [addMessage, refreshSceneObjects],
+    [addMessage, refreshSceneObjects, selectedObject],
   );
 
   // Speech-to-text
@@ -845,245 +1055,32 @@ export default function AppPage() {
           </div>
         </div>
 
-        {/* RIGHT: Simulation panel (hidden on mobile) */}
-        <div className="hidden lg:flex flex-col w-[480px] shrink-0 border-l border-[var(--border)] bg-[var(--surface)]">
-          {/* Sim header */}
-          <div className="shrink-0 px-4 py-2 border-b border-[var(--border)] flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${simConnected ? "bg-emerald-500" : "bg-red-500"}`} />
-              <span className="text-xs font-medium">Simulation View</span>
-            </div>
-            {pipelineStage !== "idle" && (
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--accent)]/10 text-[var(--accent)] font-medium">
-                {pipelineStage.replace(/_/g, " ")}
-              </span>
-            )}
-          </div>
-
-          {/* MJPEG stream */}
-          <div className="relative flex-1 min-h-0 bg-black flex items-center justify-center">
-            {simConnected ? (
-              <>
-                <img
-                  ref={simImgRef}
-                  src={getSimStreamUrl()}
-                  alt="MuJoCo simulation"
-                  className={`w-full h-full object-contain ${editorMode && !loading ? "cursor-crosshair" : ""}`}
-                  onClick={loading ? undefined : handleSimClick}
-                />
-                {loading && (
-                  <div className="absolute bottom-3 left-3 right-3 rounded-lg border border-white/20 bg-black/60 backdrop-blur-sm px-3 py-2 text-xs text-white/90">
-                    Live simulation view · planning/safety checks in progress ({stageLabel})
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="text-center text-[var(--muted)] text-sm p-8">
-                <p className="font-medium mb-2">Simulation offline</p>
-                <p className="text-xs">Start the backend: <code className="px-1.5 py-0.5 rounded bg-[var(--border)] text-xs font-mono">python api/server.py</code></p>
-              </div>
-            )}
-
-            {/* Editor mode indicator */}
-            {editorMode && (
-              <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
-                <span className="px-3 py-1.5 rounded-lg bg-blue-600/90 text-white text-xs font-medium backdrop-blur-sm">
-                  Click to place: {editorMode}
-                </span>
-                <button
-                  onClick={() => setEditorMode(null)}
-                  className="px-2 py-1 rounded-lg bg-black/50 text-white text-xs backdrop-blur-sm hover:bg-black/70"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Object palette / scene editor */}
-          <div className="shrink-0 border-t border-[var(--border)]">
-            {/* Palette */}
-            <div className="px-3 py-2">
-              <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider font-medium mb-1.5">Add Objects</p>
-              <div className="flex flex-wrap gap-1">
-                {OBJECT_PALETTE.map((obj) => (
-                  <button
-                    key={obj.type}
-                    onClick={() => setEditorMode(editorMode === obj.type ? null : obj.type)}
-                    className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                      editorMode === obj.type
-                        ? "bg-blue-600 text-white ring-2 ring-blue-400/50"
-                        : "bg-[var(--background)] border border-[var(--border)] hover:border-[var(--accent)]/30"
-                    }`}
-                  >
-                    <span className="mr-1">{obj.icon}</span>{obj.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Scene objects list */}
-            <div className="px-3 py-2 border-t border-[var(--border)] max-h-40 overflow-y-auto">
-              <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider font-medium mb-1.5">
-                Scene Objects ({sceneObjects.length})
-              </p>
-              {sceneObjects.length === 0 ? (
-                <p className="text-xs text-[var(--muted)]">No objects loaded</p>
-              ) : (
-                <div className="space-y-1">
-                  {sceneObjects.map((obj) => (
-                    <div key={obj.name} className="flex items-center justify-between text-xs group">
-                      <span className="truncate">
-                        <span className="font-medium">{obj.name}</span>
-                        <span className="text-[var(--muted)] ml-1">
-                          ({obj.position[0].toFixed(2)}, {obj.position[1].toFixed(2)}, {obj.position[2].toFixed(2)})
-                        </span>
-                      </span>
-                      <button
-                        onClick={() => handleRemoveObject(obj.name)}
-                        className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-400 transition-opacity px-1"
-                        title="Remove"
-                      >
-                        &times;
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        <SimulationPanel
+          simConnected={simConnected}
+          simCamera={simCamera}
+          pipelineStage={pipelineStage}
+          stageLabel={stageLabel}
+          simImgRef={simImgRef}
+          editorMode={editorMode}
+          loading={loading}
+          simTool={simTool}
+          selectedObject={selectedObject}
+          sceneObjects={sceneObjects}
+          simStreamUrl={getSimStreamUrl()}
+          onResetCamera={handleResetCamera}
+          onSimClick={handleSimClick}
+          onSimPointerDown={handleSimPointerDown}
+          onSimPointerMove={handleSimPointerMove}
+          onSimPointerUp={handleSimPointerUp}
+          onSimContextMenu={handleSimContextMenu}
+          onSimWheel={handleSimWheel}
+          onCancelEditor={handleCancelEditor}
+          onSelectTool={handleSelectTool}
+          onToggleAddMode={handleToggleAddMode}
+          onSelectObject={handleSelectObject}
+          onRemoveObject={handleRemoveObject}
+        />
       </div>
     </div>
-  );
-}
-
-// ── Minimal markdown renderer ────────────────────────────────────────────────
-
-// ── Expandable pipeline details ──────────────────────────────────────────────
-
-function PipelineDetails({ pipeline }: { pipeline: PipelineResponse }) {
-  const [open, setOpen] = useState(false);
-  const details = formatDetails(pipeline);
-  const gpt = isGptResponse(pipeline);
-
-  if (!details) return null;
-
-  return (
-    <div className="border-t border-[var(--border)]">
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full px-4 py-2 text-xs text-[var(--muted)] hover:text-[var(--foreground)] flex items-center gap-1.5 transition-colors"
-      >
-        <svg
-          className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`}
-          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-        </svg>
-        {open ? "Hide details" : "Show details"}
-        {gpt && (
-          <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
-            GPT
-          </span>
-        )}
-        {pipeline.intent && (
-          <span className="ml-auto text-[10px] opacity-60">
-            {Math.round(pipeline.intent.confidence * 100)}% confidence
-          </span>
-        )}
-      </button>
-      {open && (
-        <div className="px-4 pb-3 text-xs text-[var(--muted)] leading-relaxed">
-          <MarkdownLite text={details} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MarkdownLite({ text }: { text: string }) {
-  const lines = text.split("\n");
-  const elements: React.ReactNode[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    if (line === "---") {
-      elements.push(<hr key={i} className="my-3 border-[var(--border)]" />);
-    } else if (line.startsWith("**") && line.endsWith("**")) {
-      elements.push(
-        <p key={i} className="font-semibold mt-3 mb-1 text-[var(--foreground)]">
-          {line.slice(2, -2)}
-        </p>
-      );
-    } else if (line.startsWith("- ")) {
-      elements.push(
-        <p key={i} className="pl-3 text-[var(--muted)]">
-          <InlineFormat text={line} />
-        </p>
-      );
-    } else if (line.startsWith("> ")) {
-      elements.push(
-        <blockquote
-          key={i}
-          className="pl-3 border-l-2 border-[var(--accent)]/30 text-[var(--muted)] italic"
-        >
-          {line.slice(2)}
-        </blockquote>
-      );
-    } else if (line.match(/^\d+\.\s/)) {
-      elements.push(
-        <p key={i} className="pl-3">
-          <InlineFormat text={line} />
-        </p>
-      );
-    } else if (line.trim() === "") {
-      elements.push(<div key={i} className="h-1" />);
-    } else {
-      elements.push(
-        <p key={i}>
-          <InlineFormat text={line} />
-        </p>
-      );
-    }
-  }
-
-  return <div className="space-y-0.5">{elements}</div>;
-}
-
-function InlineFormat({ text }: { text: string }) {
-  // Handle **bold**, *italic*, `code`
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
-  return (
-    <>
-      {parts.map((part, i) => {
-        if (part.startsWith("**") && part.endsWith("**")) {
-          return (
-            <strong key={i} className="font-semibold text-[var(--foreground)]">
-              {part.slice(2, -2)}
-            </strong>
-          );
-        }
-        if (part.startsWith("*") && part.endsWith("*")) {
-          return (
-            <em key={i} className="italic text-[var(--accent)]">
-              {part.slice(1, -1)}
-            </em>
-          );
-        }
-        if (part.startsWith("`") && part.endsWith("`")) {
-          return (
-            <code
-              key={i}
-              className="px-1.5 py-0.5 rounded bg-[var(--border)] text-xs font-mono"
-            >
-              {part.slice(1, -1)}
-            </code>
-          );
-        }
-        return <span key={i}>{part}</span>;
-      })}
-    </>
   );
 }

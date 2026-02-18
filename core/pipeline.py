@@ -92,6 +92,17 @@ class VibeRobotPipeline:
     def current_stage(self) -> PipelineStage:
         return self._current_stage
 
+    def sync_scene_objects_from_env(self) -> None:
+        """Refresh cached scene-object positions from the live MuJoCo state."""
+        if not self._scene_objects or self.env is None:
+            return
+        for obj in self._scene_objects:
+            if obj.properties.get("fixed"):
+                continue
+            pos = self.env.get_object_pos(obj.name)
+            if pos is not None and len(pos) == 3:
+                obj.pos = (float(pos[0]), float(pos[1]), float(pos[2]))
+
     def run_sync(
         self,
         command: str,
@@ -117,6 +128,9 @@ class VibeRobotPipeline:
                 on_stage(stage, msg, result)
 
         try:
+            # Keep semantic scene metadata aligned with current simulator state.
+            self.sync_scene_objects_from_env()
+
             # Stage 1: Intent Inference
             self._current_stage = PipelineStage.INTENT_INFERENCE
             _notify("intent_inference", "Analyzing your command...")
@@ -270,6 +284,9 @@ class VibeRobotPipeline:
                 on_stage(stage, msg, result)
 
         try:
+            # Keep semantic scene metadata aligned with current simulator state.
+            self.sync_scene_objects_from_env()
+
             # Stage 1: Intent Inference (LLM)
             self._current_stage = PipelineStage.INTENT_INFERENCE
             _notify("intent_inference", "Analyzing your command with GPT...")
@@ -481,6 +498,7 @@ class VibeRobotPipeline:
         result.execution_results = self._execute_plan(
             result.plan, result.safety_contract
         )
+        self.sync_scene_objects_from_env()
         self.controller.realtime = False
         result.timestamps["exec_end"] = time.time()
         result.stage = PipelineStage.COMPLETED
@@ -558,7 +576,9 @@ class VibeRobotPipeline:
         contract: SafetyContract,
     ) -> list[dict]:
         """Execute the plan for real (after approval)."""
-        self.env.reset()
+        # Keep world/object state continuous across turns; only home the arm.
+        self.controller.open_gripper(duration=0.25)
+        self.controller.home()
         monitor = SafetyMonitor(contract)
         results = []
 
@@ -589,6 +609,7 @@ class VibeRobotPipeline:
                 )
                 break
 
+        self.sync_scene_objects_from_env()
         return results
 
     def _execute_step(self, step: PlanStep, record: bool = False) -> MotionResult:
