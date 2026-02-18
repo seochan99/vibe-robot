@@ -8,6 +8,7 @@ Can use LLM for complex scenarios or rule-based planning for common patterns.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -420,19 +421,49 @@ class Planner:
 
     def _resolve_object_name(self, target: str, scene: SceneState) -> str | None:
         """Resolve a partial object name to an actual scene object name."""
-        target_lower = target.lower()
+        target_lower = target.lower().strip()
+        if not target_lower:
+            return None
+
+        # 1) Exact identifier match.
+        for obj in scene.objects:
+            name_lower = obj.name.lower()
+            if target_lower == name_lower:
+                return obj.name
+
+        # 2) Exact base-name match (e.g. "apple" for "apple_01").
+        base_matches = []
+        for obj in scene.objects:
+            base = obj.name.lower().split("_")[0]
+            if target_lower == base:
+                base_matches.append(obj.name)
+        if base_matches:
+            return base_matches[0]
+
+        # 3) Boundary-aware partial matching (prefer longer, more specific matches).
+        ranked: list[tuple[int, str]] = []
+        pattern = re.compile(rf"(?<![a-z0-9_]){re.escape(target_lower)}(?![a-z0-9_])")
         for obj in scene.objects:
             name_lower = obj.name.lower()
             cat_lower = obj.category.lower()
-            # Exact match
-            if target_lower == name_lower:
-                return obj.name
-            # Partial match (e.g. "apple" matches "apple_01")
-            if target_lower in name_lower or target_lower in cat_lower:
-                return obj.name
-            # Handle compound names like "red_cube"
-            if name_lower.startswith(target_lower):
-                return obj.name
+            score = None
+            if pattern.search(name_lower):
+                score = 220 + len(target_lower)
+            elif name_lower.startswith(target_lower):
+                score = 170 + len(target_lower)
+            elif target_lower in name_lower:
+                score = 140 + len(target_lower)
+            elif pattern.search(cat_lower):
+                score = 120 + len(target_lower)
+            elif target_lower in cat_lower:
+                score = 90 + len(target_lower)
+
+            if score is not None:
+                ranked.append((score, obj.name))
+
+        if ranked:
+            ranked.sort(key=lambda x: (-x[0], x[1]))
+            return ranked[0][1]
         return None
 
     def _plan_fallback(self, intent: UserIntent, reason: str) -> ExecutionPlan:

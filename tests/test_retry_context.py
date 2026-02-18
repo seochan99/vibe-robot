@@ -28,6 +28,15 @@ def test_extract_mentions_by_scene_object_name_only():
     assert mentions == ["banana_01"]
 
 
+def test_extract_mentions_prioritizes_exact_identifier_over_base_alias():
+    scene = [
+        SceneObject(name="cup_01", obj_type="cylinder", pos=(0.5, 0.0, 0.35)),
+        SceneObject(name="cup_qa", obj_type="cylinder", pos=(0.55, 0.0, 0.35)),
+    ]
+    mentions = _extract_command_object_mentions("pick cup_qa instead", scene)
+    assert mentions[0] == "cup_qa"
+
+
 def test_context_fallback_locks_previous_target_after_failure():
     decision = asyncio.run(
         _analyze_command_context(

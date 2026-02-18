@@ -15,6 +15,7 @@ from typing import Optional
 
 import numpy as np
 
+from config import WORKSPACE_BOUNDS
 from core.affordance_engine import AffordanceAnalysis, AffordanceEngine
 from core.intent_inference import IntentInference, UserIntent
 from core.planner import ExecutionPlan, PlanStep, Planner
@@ -29,6 +30,17 @@ from simulator.mujoco_env import MuJoCoEnv
 from simulator.scene_builder import SceneObject, get_scene_objects_info
 
 logger = logging.getLogger(__name__)
+
+_LOW_CLEARING_POSITIONS = (
+    [0.35, 0.42, 0.06],
+    [0.45, 0.42, 0.06],
+    [0.55, 0.42, 0.06],
+    [0.65, 0.42, 0.06],
+    [0.35, -0.42, 0.06],
+    [0.45, -0.42, 0.06],
+    [0.55, -0.42, 0.06],
+    [0.65, -0.42, 0.06],
+)
 
 
 class PipelineStage(Enum):
@@ -102,6 +114,95 @@ class VibeRobotPipeline:
             pos = self.env.get_object_pos(obj.name)
             if pos is not None and len(pos) == 3:
                 obj.pos = (float(pos[0]), float(pos[1]), float(pos[2]))
+
+    def _is_low_clearing_intent(self, intent: UserIntent) -> bool:
+        goal = (intent.immediate_goal or "").strip().lower()
+        cmd = (intent.raw_command or "").lower()
+        if goal in {"clean", "clear", "sort", "organize"}:
+            return True
+        low_words = ("under", "below", "bottom", "밑", "아래", "하부", "바닥")
+        return any(w in cmd for w in low_words)
+
+    def _clamp_position(self, position: list[float]) -> list[float]:
+        pos = np.asarray(position[:3], dtype=float).copy()
+        for i, axis in enumerate(("x", "y", "z")):
+            lo, hi = WORKSPACE_BOUNDS[axis]
+            pos[i] = float(np.clip(pos[i], lo, hi))
+        return pos.tolist()
+
+    def _resolve_plan_target_name(
+        self,
+        target: str,
+        scene: SceneState,
+    ) -> str:
+        if not target:
+            return target
+        resolved = self.planner._resolve_object_name(target, scene)  # noqa: SLF001
+        return resolved or target
+
+    def _normalize_plan_for_execution(
+        self,
+        plan: ExecutionPlan,
+        scene: SceneState,
+        intent: UserIntent,
+        notify=None,
+    ) -> ExecutionPlan:
+        """Normalize planner output into controller-ready primitives.
+
+        LLM plans are allowed to be semantic. This adapter guarantees executable
+        params for primitives expected by the controller.
+        """
+        low_clearing = self._is_low_clearing_intent(intent)
+        normalized: list[PlanStep] = []
+        held_target: str | None = None
+        placement_index = 0
+
+        for step in plan.steps:
+            target = self._resolve_plan_target_name(step.target, scene)
+            params = dict(step.params or {})
+
+            if step.action == "pick":
+                held_target = target
+
+            if step.action == "place":
+                if (not target or target == "held_object") and held_target:
+                    target = held_target
+
+                if "position" in params and isinstance(params.get("position"), (list, tuple)):
+                    pos = list(params.get("position", []))
+                    if len(pos) >= 3:
+                        params["position"] = self._clamp_position(pos)
+
+                if "position" not in params and "on" not in params:
+                    if low_clearing:
+                        pos = list(_LOW_CLEARING_POSITIONS[placement_index % len(_LOW_CLEARING_POSITIONS)])
+                        placement_index += 1
+                    else:
+                        pos = [0.5, 0.0, 0.35]
+                    params["position"] = self._clamp_position(pos)
+                    if notify:
+                        notify(
+                            "plan_normalization",
+                            f"Auto-filled place target for {target}: {params['position']}",
+                        )
+
+            normalized.append(
+                PlanStep(
+                    action=step.action,
+                    target=target,
+                    params=params,
+                    description=step.description,
+                )
+            )
+
+        return ExecutionPlan(
+            steps=normalized,
+            plan_description=plan.plan_description,
+            estimated_duration=plan.estimated_duration,
+            risk_level=plan.risk_level,
+            reasoning=plan.reasoning,
+            requires_approval=plan.requires_approval,
+        )
 
     def run_sync(
         self,
@@ -185,6 +286,12 @@ class VibeRobotPipeline:
                 preferred_target,
                 _notify,
             )
+            result.plan = self._normalize_plan_for_execution(
+                result.plan,
+                result.scene,
+                result.intent,
+                _notify,
+            )
             result.timestamps["plan_end"] = time.time()
 
             if not result.plan.steps:
@@ -242,8 +349,7 @@ class VibeRobotPipeline:
                 result.plan, result.safety_contract
             )
             result.timestamps["exec_end"] = time.time()
-
-            result.stage = PipelineStage.COMPLETED
+            self._apply_execution_outcome(result)
             result.timestamps["end"] = time.time()
 
         except Exception as e:
@@ -378,6 +484,12 @@ class VibeRobotPipeline:
                         preferred_target,
                         _notify,
                     )
+                    result.plan = self._normalize_plan_for_execution(
+                        result.plan,
+                        result.scene,
+                        result.intent,
+                        _notify,
+                    )
                     _notify("plan_done", f"GPT Plan: {result.plan.plan_description}")
                 except Exception as e:
                     logger.exception(
@@ -397,6 +509,12 @@ class VibeRobotPipeline:
                         preferred_target,
                         _notify,
                     )
+                    result.plan = self._normalize_plan_for_execution(
+                        result.plan,
+                        result.scene,
+                        result.intent,
+                        _notify,
+                    )
                     steps_desc = ", ".join(
                         f"{s.action}({s.target})" for s in result.plan.steps
                     )
@@ -413,6 +531,12 @@ class VibeRobotPipeline:
                     result.scene,
                     result.affordance,
                     preferred_target,
+                    _notify,
+                )
+                result.plan = self._normalize_plan_for_execution(
+                    result.plan,
+                    result.scene,
+                    result.intent,
                     _notify,
                 )
                 steps_desc = ", ".join(
@@ -472,8 +596,7 @@ class VibeRobotPipeline:
                 result.plan, result.safety_contract
             )
             result.timestamps["exec_end"] = time.time()
-
-            result.stage = PipelineStage.COMPLETED
+            self._apply_execution_outcome(result)
             result.timestamps["end"] = time.time()
 
         except Exception as e:
@@ -501,12 +624,26 @@ class VibeRobotPipeline:
         self.sync_scene_objects_from_env()
         self.controller.realtime = False
         result.timestamps["exec_end"] = time.time()
-        result.stage = PipelineStage.COMPLETED
+        self._apply_execution_outcome(result)
         result.timestamps["end"] = time.time()
 
         self._current_stage = result.stage
         self._result = result
         return result
+
+    def _apply_execution_outcome(self, result: PipelineResult) -> None:
+        """Set final stage/error from execution step results."""
+        failed = [r for r in result.execution_results if not r.get("success", True)]
+        if failed:
+            result.stage = PipelineStage.FAILED
+            if not result.error:
+                head = failed[0]
+                result.error = (
+                    f"{head.get('action')}({head.get('target')}): "
+                    f"{head.get('message') or 'execution failed'}"
+                )
+            return
+        result.stage = PipelineStage.COMPLETED
 
     def _run_simulation_preview(
         self,
@@ -537,7 +674,9 @@ class VibeRobotPipeline:
 
                 # Execute plan steps in simulation
                 for step in plan.steps:
-                    self._execute_step(step, record=True)
+                    motion_result = self._execute_step(step, record=True)
+                    if not motion_result.success:
+                        break
 
                     # Check safety invariants
                     state = self.env.get_state()
@@ -593,6 +732,9 @@ class VibeRobotPipeline:
                     "message": motion_result.message,
                 }
             )
+
+            if not motion_result.success:
+                break
 
             # Check safety
             state = self.env.get_state()

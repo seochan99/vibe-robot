@@ -7,6 +7,7 @@ focused on request orchestration.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -29,30 +30,64 @@ def _extract_command_object_mentions(
     command: str,
     scene_objects: list[SceneObject],
 ) -> list[str]:
-    """Extract explicit object mentions from command text using scene names only."""
-    cmd = (command or "").lower()
-    matches: list[str] = []
+    """Extract explicit object mentions from command text using scene names only.
 
-    def _push(name: str):
-        if name not in matches:
-            matches.append(name)
+    Matching priority:
+    1) exact full object ids (e.g. ``cup_qa``)
+    2) exact spaced ids (e.g. ``cup qa``)
+    3) base-name aliases (e.g. ``cup``)
+    4) loose substring fallback
+    """
+    cmd = (command or "").lower()
+    ranked: list[tuple[int, int, str]] = []
+
+    def _word_index(text: str, alias: str) -> Optional[int]:
+        if not alias:
+            return None
+        pattern = re.compile(rf"(?<![a-z0-9_]){re.escape(alias)}(?![a-z0-9_])")
+        m = pattern.search(text)
+        if m:
+            return int(m.start())
+        return None
 
     for obj in scene_objects:
-        name = obj.name.lower()
-        base = name.split("_")[0]
-        aliases = {
-            name,
-            name.replace("_", " "),
-            base,
-            base.replace("_", " "),
-        }
-        for alias in aliases:
-            alias = alias.strip()
-            if alias and alias in cmd:
-                _push(obj.name)
-                break
+        name = obj.name.lower().strip()
+        base = name.split("_")[0].strip()
 
-    return matches
+        # Highest confidence: full id exact token match.
+        idx = _word_index(cmd, name)
+        if idx is not None:
+            ranked.append((400 + len(name), idx, obj.name))
+            continue
+
+        spaced = name.replace("_", " ").strip()
+        idx = _word_index(cmd, spaced)
+        if idx is not None:
+            ranked.append((360 + len(spaced), idx, obj.name))
+            continue
+
+        # Base alias match (e.g. "cup").
+        idx = _word_index(cmd, base)
+        if idx is not None:
+            ranked.append((220 + len(base), idx, obj.name))
+            continue
+
+        # Last resort: loose substring match.
+        pos = cmd.find(name)
+        if pos >= 0:
+            ranked.append((120 + len(name), pos, obj.name))
+            continue
+        if base:
+            pos = cmd.find(base)
+            if pos >= 0:
+                ranked.append((80 + len(base), pos, obj.name))
+
+    ranked.sort(key=lambda x: (-x[0], x[1], x[2]))
+    out: list[str] = []
+    for _, _, name in ranked:
+        if name not in out:
+            out.append(name)
+    return out
 
 
 def _normalize_object_name(

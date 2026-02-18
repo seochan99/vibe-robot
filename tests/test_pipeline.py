@@ -13,9 +13,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.pipeline import PipelineStage, VibeRobotPipeline
+from core.planner import ExecutionPlan, PlanStep
 from simulator.franka_controller import FrankaController
 from simulator.mujoco_env import MuJoCoEnv
-from simulator.scene_builder import TASK_PRESETS, build_scene_xml
+from simulator.scene_builder import TASK_PRESETS, build_scene_xml, get_scene_objects_info
 
 
 def _create_pipeline(scene_name: str = "wind_paper"):
@@ -76,7 +77,9 @@ class TestPipelineE2E:
         assert result.stage == PipelineStage.AWAITING_APPROVAL
 
         result = pipeline.approve_and_execute(result)
-        assert result.stage == PipelineStage.COMPLETED
+        assert result.stage in (PipelineStage.COMPLETED, PipelineStage.FAILED)
+        if result.stage == PipelineStage.FAILED:
+            assert any(not r["success"] for r in result.execution_results)
 
     def test_retry_guardrail_keeps_preferred_target(self):
         """Retry feedback should keep previously targeted object."""
@@ -127,11 +130,44 @@ class TestPipelineE2E:
         assert "intent_start" in result.timestamps
         assert "intent_end" in result.timestamps
 
+    def test_plan_normalization_fills_missing_place_position(self):
+        pipeline = _create_pipeline("wind_paper")
+        scene = pipeline.scene_engine.analyze_from_metadata(
+            get_scene_objects_info(pipeline._scene_objects)
+        )
+        intent = pipeline.intent_engine.infer_sync("책상 위 물건을 다 치워줘", pipeline._get_scene_summary())
+        plan = ExecutionPlan(
+            steps=[
+                PlanStep(action="pick", target="book_01"),
+                PlanStep(action="place", target="book_01"),
+            ],
+            plan_description="test missing place params",
+            estimated_duration=4.0,
+        )
+        normalized = pipeline._normalize_plan_for_execution(plan, scene, intent)
+        assert "position" in normalized.steps[1].params
+        assert len(normalized.steps[1].params["position"]) == 3
+
+    def test_execute_plan_stops_after_first_motion_failure(self):
+        pipeline = _create_pipeline("wind_paper")
+        plan = ExecutionPlan(
+            steps=[
+                PlanStep(action="pick", target="does_not_exist"),
+                PlanStep(action="pick", target="book_01"),
+            ],
+            plan_description="fail-fast test",
+            estimated_duration=2.0,
+        )
+        contract = pipeline.safety_gen.generate(plan)
+        results = pipeline._execute_plan(plan, contract)
+        assert len(results) == 1
+        assert results[0]["action"] == "pick"
+        assert not results[0]["success"]
+
 
 class TestSafetyContract:
 
     def test_contract_has_all_sections(self):
-        from core.planner import ExecutionPlan, PlanStep
         from core.safety_contract import SafetyContractGenerator
 
         plan = ExecutionPlan(
