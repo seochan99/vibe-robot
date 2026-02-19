@@ -22,6 +22,7 @@ from simulator.mujoco_env import MuJoCoEnv
 from simulator.scene_builder import (
     TASK_PRESETS,
     build_scene_xml,
+    clone_scene_objects,
     get_scene_objects_info,
 )
 from study.logger import InteractionLogger
@@ -87,7 +88,9 @@ class AppState:
 
     def init_pipeline(self, scene_name: str):
         self.scene_name = scene_name
-        objects = TASK_PRESETS.get(scene_name, TASK_PRESETS["wind_paper"])
+        objects = clone_scene_objects(
+            TASK_PRESETS.get(scene_name, TASK_PRESETS["wind_paper"])
+        )
         xml = build_scene_xml(objects, include_wind="wind" in scene_name)
         env = MuJoCoEnv(xml_string=xml)
         controller = FrankaController(env)

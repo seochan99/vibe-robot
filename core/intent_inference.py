@@ -345,7 +345,8 @@ def _extract_target_objects(command: str, scene_context: str, intent_data: dict)
     """Extract target object names from the user command.
 
     Prioritizes objects explicitly mentioned in the command.
-    Falls back to scene context only if nothing found in command.
+    If none are mentioned explicitly, returns an empty list so retry/context
+    resolver can decide instead of guessing from all scene objects.
     """
     cmd_lower = command.lower()
 
@@ -364,10 +365,4 @@ def _extract_target_objects(command: str, scene_context: str, intent_data: dict)
     if from_command:
         return from_command
 
-    # 3) Fallback: look in scene context (but only return objects, not all scene names)
-    scene_lower = scene_context.lower()
-    from_scene = []
-    for name in _EN_OBJECT_NAMES:
-        if name in scene_lower:
-            from_scene.append(name)
-    return from_scene
+    return []

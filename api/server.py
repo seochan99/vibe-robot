@@ -34,6 +34,7 @@ from simulator.scene_builder import (
     TASK_PRESETS,
     SceneObject,
     build_scene_xml,
+    clone_scene_objects,
     get_scene_objects_info,
 )
 from study.logger import InteractionLogger
@@ -87,7 +88,9 @@ class AppState:
         self.last_plan_description = None
         self.last_failure_summary = None
         self.turn_history = []
-        objects = TASK_PRESETS.get(scene_name, TASK_PRESETS["wind_paper"])
+        objects = clone_scene_objects(
+            TASK_PRESETS.get(scene_name, TASK_PRESETS["wind_paper"])
+        )
         xml = build_scene_xml(objects, include_wind="wind" in scene_name)
         env = MuJoCoEnv(xml_string=xml)
         controller = FrankaController(env)

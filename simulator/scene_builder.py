@@ -6,6 +6,7 @@ Scenes are composed by combining the Franka model with dynamically added objects
 
 from __future__ import annotations
 
+import copy
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -140,6 +141,11 @@ TASK_PRESETS: dict[str, list[SceneObject]] = {
     "wind_paper": DESK_SCENE_OBJECTS + WIND_PAPER_OBJECTS,
     "sorting": DESK_SCENE_OBJECTS + SORTING_OBJECTS,
 }
+
+
+def clone_scene_objects(objects: list[SceneObject]) -> list[SceneObject]:
+    """Return a deep-copied scene object list safe for per-session mutation."""
+    return [copy.deepcopy(obj) for obj in objects]
 
 
 def build_scene_xml(

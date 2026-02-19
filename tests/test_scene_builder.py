@@ -11,6 +11,7 @@ from simulator.scene_builder import (
     TASK_PRESETS,
     SceneObject,
     build_scene_xml,
+    clone_scene_objects,
     get_scene_objects_info,
 )
 
@@ -50,3 +51,19 @@ class TestSceneBuilder:
         for name, objects in TASK_PRESETS.items():
             xml = build_scene_xml(objects)
             assert "<mujoco" in xml, f"Preset '{name}' failed to build"
+
+    def test_clone_scene_objects_isolation(self):
+        base = TASK_PRESETS["wind_paper"]
+        cloned = clone_scene_objects(base)
+        cloned.append(
+            SceneObject(
+                name="qa_probe",
+                obj_type="sphere",
+                size=(0.01,),
+                pos=(0.5, 0.0, 0.35),
+                rgba=(1.0, 0.0, 0.0, 1.0),
+                mass=0.01,
+                properties={"graspable": True},
+            )
+        )
+        assert all(obj.name != "qa_probe" for obj in TASK_PRESETS["wind_paper"])

@@ -143,6 +143,15 @@ class Planner:
             if affordance.recommended_affordance == "weight_provider":
                 return self._plan_weight_placement(scene, intent, affordance)
             return self._plan_generic_pick_place(scene, intent, affordance)
+        elif goal in ("follow", "follow_user_instruction", "follow user instruction"):
+            # Correction-style utterances ("do it properly") should not invent new placement.
+            if intent.target_objects:
+                return self._plan_pick_only(scene, intent, affordance)
+            return self._plan_generic_pick_place(scene, intent, affordance)
+
+        # If we have a single clear target but ambiguous goal, prefer a conservative pick.
+        if len(intent.target_objects) == 1:
+            return self._plan_pick_only(scene, intent, affordance)
 
         # Affordance-based fallback
         if affordance.recommended_affordance == "weight_provider":

@@ -100,6 +100,20 @@ class TestPipelineE2E:
         targets = [s.target for s in result.plan.steps]
         assert "banana_01" in targets
 
+    def test_retry_feedback_prefers_conservative_pick_over_new_place(self):
+        pipeline = _create_pipeline("wind_paper")
+        result = pipeline.run_sync(
+            "아니 제대로 해달라고",
+            auto_approve=False,
+            context_hint='Previous attempt target object: "book_01".',
+            preferred_target="book_01",
+        )
+        assert result.plan is not None
+        assert result.plan.steps
+        assert result.plan.steps[0].action == "pick"
+        assert result.plan.steps[0].target == "book_01"
+        assert all(step.action != "place" for step in result.plan.steps)
+
     def test_pick_and_place_pipeline(self):
         """Test simple pick-and-place scenario."""
         pipeline = _create_pipeline("pick_and_place")
@@ -163,6 +177,14 @@ class TestPipelineE2E:
         assert "apple" in intent.target_objects
         assert "paper" in intent.target_objects
         assert intent.immediate_goal in {"move", "pick"}
+
+    def test_rule_based_intent_no_target_does_not_guess_from_scene(self):
+        pipeline = _create_pipeline("wind_paper")
+        intent = pipeline.intent_engine.infer_sync(
+            "아니 제대로 해달라고",
+            pipeline._get_scene_summary(),
+        )
+        assert intent.target_objects == []
 
     def test_execute_plan_stops_after_first_motion_failure(self):
         pipeline = _create_pipeline("wind_paper")
