@@ -202,7 +202,7 @@ _KEYWORD_PATTERNS = {
         },
     },
     "move_object": {
-        "keywords": ["옮겨", "옮기", "move", "put", "place", "놓아", "놓"],
+        "keywords": ["옮겨", "옮기", "move", "put", "place", "놓아", "놓", "올려", "위에", "onto", "on top"],
         "intent": {
             "literal_meaning": "Move an object to a location",
             "intended_meaning": "Relocate a specific object to a target",
@@ -215,7 +215,7 @@ _KEYWORD_PATTERNS = {
         },
     },
     "pick_up": {
-        "keywords": ["집어", "잡아", "pick", "grab", "들어", "가져"],
+        "keywords": ["집어", "잡아", "pick", "grab", "들어", "들고", "들어서", "가져"],
         "intent": {
             "literal_meaning": "Pick up an object",
             "intended_meaning": "Grasp and lift a specific object",
@@ -283,16 +283,26 @@ def _rule_based_inference(command: str, scene_context: str) -> UserIntent:
             best_match = pattern
 
     if best_match is None:
+        extracted = _extract_target_objects(command, scene_context, {})
+        inferred_goal = "pick" if len(extracted) == 1 else ("move" if len(extracted) >= 2 else "follow")
+        intended = (
+            "Relocate the primary object to the referenced destination"
+            if inferred_goal == "move"
+            else ("Grasp and lift the referenced object" if inferred_goal == "pick" else f"Execute: {command}")
+        )
         return UserIntent(
             raw_command=command,
             literal_meaning=command,
-            intended_meaning=f"Execute: {command}",
-            immediate_goal="Follow user instruction",
+            intended_meaning=intended,
+            immediate_goal=inferred_goal,
             deep_goal="Complete the requested task",
-            target_objects=[],
+            target_objects=extracted,
             implicit_constraints=["Operate safely"],
-            confidence=0.3,
-            reasoning="No clear pattern matched; using literal interpretation",
+            confidence=0.45 if extracted else 0.3,
+            reasoning=(
+                "No clear pattern matched; inferred target objects from command text "
+                f"({extracted}) and derived goal={inferred_goal}."
+            ),
         )
 
     intent_data = best_match["intent"]

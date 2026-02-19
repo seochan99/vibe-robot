@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import logging
+import re
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Optional
@@ -140,6 +141,30 @@ class VibeRobotPipeline:
         resolved = self.planner._resolve_object_name(target, scene)  # noqa: SLF001
         return resolved or target
 
+    def _extract_scene_mentions(self, text: str, scene: SceneState) -> list[str]:
+        if not text:
+            return []
+        hay = text.lower()
+        mentions: list[str] = []
+        for obj in scene.objects:
+            name = obj.name.lower()
+            base = name.split("_")[0]
+            cat = obj.category.lower()
+            if name in hay:
+                mentions.append(obj.name)
+                continue
+            if re.search(rf"(?<![a-z0-9_]){re.escape(base)}(?![a-z0-9_])", hay):
+                mentions.append(obj.name)
+                continue
+            if re.search(rf"(?<![a-z0-9_]){re.escape(cat)}(?![a-z0-9_])", hay):
+                mentions.append(obj.name)
+        # De-duplicate while preserving order.
+        deduped: list[str] = []
+        for name in mentions:
+            if name not in deduped:
+                deduped.append(name)
+        return deduped
+
     def _normalize_plan_for_execution(
         self,
         plan: ExecutionPlan,
@@ -160,6 +185,34 @@ class VibeRobotPipeline:
             obj.name: list(obj.position) for obj in scene.objects
         }
 
+        # Build intent-derived target hints for semantic repair.
+        intent_targets: list[str] = []
+        for t in intent.target_objects:
+            resolved = self._resolve_plan_target_name(t, scene)
+            if resolved in object_pos and resolved not in intent_targets:
+                intent_targets.append(resolved)
+        intent_mentions = self._extract_scene_mentions(
+            " ".join(
+                [
+                    intent.raw_command or "",
+                    intent.literal_meaning or "",
+                    intent.intended_meaning or "",
+                    intent.deep_goal or "",
+                    " ".join(intent.implicit_constraints or []),
+                ]
+            ),
+            scene,
+        )
+        for m in intent_mentions:
+            if m not in intent_targets:
+                intent_targets.append(m)
+        primary_intent_target = intent_targets[0] if intent_targets else None
+        destination_hint = None
+        for candidate in intent_targets[1:]:
+            if candidate != primary_intent_target:
+                destination_hint = candidate
+                break
+
         resolved_targets: list[str] = [
             self._resolve_plan_target_name(step.target, scene) for step in plan.steps
         ]
@@ -169,7 +222,12 @@ class VibeRobotPipeline:
             params = dict(step.params or {})
 
             if step.action == "pick":
+                if (not target) and primary_intent_target:
+                    target = primary_intent_target
                 held_target = target
+
+            if step.action == "move_to" and not target and held_target and destination_hint:
+                target = destination_hint
 
             if (
                 step.action == "move_to"
@@ -206,6 +264,42 @@ class VibeRobotPipeline:
             if step.action == "place":
                 if (not target or target == "held_object") and held_target:
                     target = held_target
+
+                if "on" in params and params["on"]:
+                    resolved_on = self._resolve_plan_target_name(str(params["on"]), scene)
+                    if resolved_on in object_pos and resolved_on != target:
+                        params["on"] = resolved_on
+                    else:
+                        params.pop("on", None)
+
+                if "on" not in params and destination_hint and destination_hint != target:
+                    params["on"] = destination_hint
+                    if notify:
+                        notify(
+                            "plan_normalization",
+                            f"Inferred place support target for {target}: on={destination_hint}",
+                        )
+
+                if "on" not in params:
+                    step_mentions = self._extract_scene_mentions(
+                        " ".join(
+                            [
+                                step.description or "",
+                                plan.plan_description or "",
+                                plan.reasoning or "",
+                            ]
+                        ),
+                        scene,
+                    )
+                    for m in step_mentions:
+                        if m != target:
+                            params["on"] = m
+                            if notify:
+                                notify(
+                                    "plan_normalization",
+                                    f"Recovered place support target for {target}: on={m}",
+                                )
+                            break
 
                 if "position" not in params and "on" not in params:
                     if low_clearing:

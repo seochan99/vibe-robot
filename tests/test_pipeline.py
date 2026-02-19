@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.pipeline import PipelineStage, VibeRobotPipeline
 from core.planner import ExecutionPlan, PlanStep
+from core.intent_inference import UserIntent
 from simulator.franka_controller import FrankaController
 from simulator.mujoco_env import MuJoCoEnv
 from simulator.scene_builder import (
@@ -153,6 +154,16 @@ class TestPipelineE2E:
         assert "position" in normalized.steps[1].params
         assert len(normalized.steps[1].params["position"]) == 3
 
+    def test_rule_based_intent_extracts_targets_for_colloquial_move_phrase(self):
+        pipeline = _create_pipeline("wind_paper")
+        intent = pipeline.intent_engine.infer_sync(
+            "사과 들고 종이위에 올려줘",
+            pipeline._get_scene_summary(),
+        )
+        assert "apple" in intent.target_objects
+        assert "paper" in intent.target_objects
+        assert intent.immediate_goal in {"move", "pick"}
+
     def test_execute_plan_stops_after_first_motion_failure(self):
         pipeline = _create_pipeline("wind_paper")
         plan = ExecutionPlan(
@@ -231,6 +242,50 @@ class TestPipelineE2E:
         assert results[0]["action"] == "pick"
         assert results[0]["target"] == "cube"
         assert results[0]["success"]
+
+    def test_normalization_recovers_place_support_from_intent_text(self):
+        objects = list(TASK_PRESETS["wind_paper"]) + [
+            SceneObject(
+                name="apple",
+                obj_type="sphere",
+                size=(0.03,),
+                pos=(0.68, 0.14, 0.35),
+                rgba=(0.9, 0.15, 0.1, 1.0),
+                mass=0.15,
+                properties={"graspable": True, "fruit": True},
+            )
+        ]
+        xml = build_scene_xml(objects, include_wind=True)
+        env = MuJoCoEnv(xml_string=xml)
+        controller = FrankaController(env)
+        env.reset()
+        pipeline = VibeRobotPipeline(env, controller, scene_objects=objects)
+        scene = pipeline.scene_engine.analyze_from_metadata(get_scene_objects_info(objects))
+
+        intent = UserIntent(
+            raw_command="사과 들고 종이위에 올려줘",
+            literal_meaning="pick and place apple on paper",
+            intended_meaning="Place apple on paper_01",
+            immediate_goal="pick",
+            deep_goal="Put apple on top of paper_01",
+            target_objects=["apple"],
+            implicit_constraints=["Place gently on paper_01"],
+            confidence=0.9,
+        )
+        plan = ExecutionPlan(
+            steps=[
+                PlanStep(action="pick", target="apple"),
+                PlanStep(action="move_to", target=""),
+                PlanStep(action="place", target="apple"),
+            ],
+            plan_description="Place apple on paper_01",
+            estimated_duration=7.0,
+        )
+
+        normalized = pipeline._normalize_plan_for_execution(plan, scene, intent)
+        assert normalized.steps[1].target == "paper_01"
+        assert "position" in normalized.steps[1].params
+        assert normalized.steps[2].params.get("on") == "paper_01"
 
 
 class TestSafetyContract:

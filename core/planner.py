@@ -167,6 +167,29 @@ class Planner:
         if not obj:
             return self._plan_fallback(intent, "No target object specified")
 
+        # Some utterances include pick + placement intent ("올려줘", "on top of", etc.).
+        destination_obj = self._infer_destination_object(intent, scene, picked_obj=obj)
+        if self._intent_requests_placement(intent) and destination_obj:
+            steps = [
+                PlanStep(action="pick", target=obj, description=f"Pick up {obj}"),
+                PlanStep(
+                    action="place",
+                    target=obj,
+                    params={"on": destination_obj},
+                    description=f"Place {obj} on {destination_obj}",
+                ),
+            ]
+            return ExecutionPlan(
+                steps=steps,
+                plan_description=f"Pick up {obj} and place on {destination_obj}",
+                estimated_duration=7.0,
+                risk_level="medium",
+                reasoning=(
+                    f"Command implies a destination placement. Using {destination_obj} "
+                    f"as support target for {obj}."
+                ),
+            )
+
         steps = [
             PlanStep(action="pick", target=obj, description=f"Pick up {obj}"),
         ]
@@ -464,6 +487,62 @@ class Planner:
         if ranked:
             ranked.sort(key=lambda x: (-x[0], x[1]))
             return ranked[0][1]
+        return None
+
+    def _intent_requests_placement(self, intent: UserIntent) -> bool:
+        text = " ".join(
+            [
+                intent.raw_command or "",
+                intent.literal_meaning or "",
+                intent.intended_meaning or "",
+            ]
+        ).lower()
+        placement_markers = (
+            " on ",
+            " onto ",
+            " on top ",
+            "place",
+            "put",
+            "위에",
+            "올려",
+            "놓",
+        )
+        return any(marker in text for marker in placement_markers)
+
+    def _infer_destination_object(
+        self,
+        intent: UserIntent,
+        scene: SceneState,
+        picked_obj: str,
+    ) -> str | None:
+        # Prefer explicit second target object from intent extraction.
+        for candidate in intent.target_objects[1:]:
+            resolved = self._resolve_object_name(candidate, scene)
+            if resolved and resolved != picked_obj:
+                return resolved
+
+        # Fallback: scan intent text for any scene object reference (excluding picked object).
+        haystack = " ".join(
+            [
+                intent.raw_command or "",
+                intent.literal_meaning or "",
+                intent.intended_meaning or "",
+                intent.deep_goal or "",
+                " ".join(intent.implicit_constraints or []),
+            ]
+        ).lower()
+        for obj in scene.objects:
+            if obj.name == picked_obj:
+                continue
+            name = obj.name.lower()
+            base = name.split("_")[0]
+            cat = obj.category.lower()
+            if name in haystack:
+                return obj.name
+            if re.search(rf"(?<![a-z0-9_]){re.escape(base)}(?![a-z0-9_])", haystack):
+                return obj.name
+            if re.search(rf"(?<![a-z0-9_]){re.escape(cat)}(?![a-z0-9_])", haystack):
+                return obj.name
         return None
 
     def _plan_fallback(self, intent: UserIntent, reason: str) -> ExecutionPlan:
