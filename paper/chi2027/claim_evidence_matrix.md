@@ -35,6 +35,7 @@ Scope: Map major claims in `/Users/chan/viberobot/paper/chi2027/main.tex` to ver
 | S9 | Scene re-init removes runtime-added objects (isolation) | API test | `/Users/chan/viberobot/tests/test_api_scene_isolation.py:13` |
 | S10 | Study logging captures commands/approval/failure/patch/timing | Code | `/Users/chan/viberobot/study/logger.py:66`, `/Users/chan/viberobot/study/logger.py:93`, `/Users/chan/viberobot/study/logger.py:104`, `/Users/chan/viberobot/study/logger.py:108`, `/Users/chan/viberobot/study/logger.py:112` |
 | S11 | Framework figure is LaTeX-native (not raster-only), enabling source-level auditability | TeX artifact | `/Users/chan/viberobot/paper/chi2027/figures/framework_tikz.tex:1` |
+| S12 | Runtime UI walkthrough (landing -> preview -> approval -> execute -> retry) is explicitly documented as a stateful interaction flow | TeX artifact + manuscript mapping | `/Users/chan/viberobot/paper/chi2027/figures/ui_execution_flow_tikz.tex:1`, `/Users/chan/viberobot/paper/chi2027/main.tex:150` |
 
 ## C. Local Regression Execution Record
 

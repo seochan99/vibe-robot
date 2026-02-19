@@ -1,0 +1,68 @@
+\begin{tikzpicture}[
+  panel/.style={
+    rounded corners=2.2mm,
+    draw=black!35,
+    fill=black!2,
+    line width=0.6pt,
+    minimum width=5.55cm,
+    minimum height=3.85cm,
+    inner sep=5pt
+  },
+  title/.style={font=\bfseries\footnotesize, anchor=north west, align=left},
+  body/.style={font=\scriptsize, anchor=north west, align=left, text width=5.05cm},
+  chipPreview/.style={font=\scriptsize, rounded corners=1mm, draw=orange!60!black, fill=orange!18, inner xsep=3.5pt, inner ysep=1.2pt},
+  chipExec/.style={font=\scriptsize, rounded corners=1mm, draw=green!50!black, fill=green!18, inner xsep=3.5pt, inner ysep=1.2pt},
+  chipApproval/.style={font=\scriptsize, rounded corners=1mm, draw=blue!55!black, fill=blue!12, inner xsep=3.5pt, inner ysep=1.2pt},
+  flow/.style={-{Stealth[length=2.5mm]}, line width=0.9pt, draw=black!65},
+  loop/.style={-{Stealth[length=2.2mm]}, line width=0.85pt, draw=black!55}
+]
+
+% Row 1
+\node[panel] (p1) at (0,0) {};
+\node[panel] (p2) at (6.2,0) {};
+\node[panel] (p3) at (12.4,0) {};
+
+% Row 2
+\node[panel] (p4) at (0,-4.6) {};
+\node[panel] (p5) at (6.2,-4.6) {};
+\node[panel] (p6) at (12.4,-4.6) {};
+
+% Panel 1
+\node[title] at ([xshift=3mm,yshift=-3mm]p1.north west) {S0. Landing + Scene Setup};
+\node[body] at ([xshift=3mm,yshift=-10mm]p1.north west) {User opens \textit{VibeRobot!}, selects scene/model,\\and confirms dual-pane layout (chat left,\\simulation right).};
+\node[chipApproval] at ([xshift=-3mm,yshift=6mm]p1.south east) {Ready};
+
+% Panel 2
+\node[title] at ([xshift=3mm,yshift=-3mm]p2.north west) {S1. Natural-Language Command};
+\node[body] at ([xshift=3mm,yshift=-10mm]p2.north west) {User enters a request (e.g., ``Pick up the\\apple please''). Input is accepted before\\any arm movement.};
+\node[chipApproval] at ([xshift=-3mm,yshift=6mm]p2.south east) {Command sent};
+
+% Panel 3
+\node[title] at ([xshift=3mm,yshift=-3mm]p3.north west) {S2. Pipeline + Chat Preview};
+\node[body] at ([xshift=3mm,yshift=-10mm]p3.north west) {Pipeline log appears in chat:\\intent resolution $\rightarrow$ affordance analysis\\$\rightarrow$ plan synthesis $\rightarrow$ safety contract.\\A visual preview is rendered in chat.};
+\node[chipPreview] at ([xshift=-3mm,yshift=6mm]p3.south east) {simulation preview};
+
+% Panel 4
+\node[title] at ([xshift=3mm,yshift=-3mm]p4.north west) {S3. Approval Gate};
+\node[body] at ([xshift=3mm,yshift=-10mm]p4.north west) {Plan card exposes details/confidence and\\shows explicit controls: \textit{Reject} vs\\\textit{Approve \& Execute}. Right panel remains\\preview-only until approval.};
+\node[chipApproval] at ([xshift=-3mm,yshift=6mm]p4.south east) {Plan ready for approval};
+
+% Panel 5
+\node[title] at ([xshift=3mm,yshift=-3mm]p5.north west) {S4. Approved Execution};
+\node[body] at ([xshift=3mm,yshift=-10mm]p5.north west) {After explicit approval, status switches to\\\textit{executing}; simulator motion starts and\\elapsed-time telemetry is shown.};
+\node[chipExec] at ([xshift=-3mm,yshift=6mm]p5.south east) {executing};
+
+% Panel 6
+\node[title] at ([xshift=3mm,yshift=-3mm]p6.north west) {S5. Failure-Aware Retry};
+\node[body] at ([xshift=3mm,yshift=-10mm]p6.north west) {If execution fails or quality is poor, user\\issues corrective language. Failure Inspector +\\Patch Suggestions trigger a bounded repair\\loop with context carry-over.};
+\node[chipApproval] at ([xshift=-3mm,yshift=6mm]p6.south east) {repair loop};
+
+% Flow arrows
+\draw[flow] (p1.east) -- (p2.west);
+\draw[flow] (p2.east) -- (p3.west);
+\draw[flow] (p3.south) -- ++(0,-0.6) -| (p4.north);
+\draw[flow] (p4.east) -- (p5.west);
+\draw[flow] (p5.east) -- (p6.west);
+\draw[loop] (p6.north) to[out=90,in=0] ([xshift=2mm]p3.east);
+
+\end{tikzpicture}
