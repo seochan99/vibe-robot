@@ -1,0 +1,42 @@
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  node distance=0.55cm and 0.55cm,
+  module/.style={draw, rounded corners=2pt, align=center, minimum height=1.0cm, text width=2.2cm, fill=blue!7},
+  support/.style={draw, rounded corners=2pt, align=center, minimum height=0.95cm, text width=2.5cm, fill=orange!12},
+  gate/.style={draw, rounded corners=2pt, align=center, minimum height=1.0cm, text width=2.2cm, fill=green!14},
+  trace/.style={draw, rounded corners=2pt, align=center, minimum height=0.85cm, text width=2.5cm, fill=gray!12},
+  arr/.style={-Latex, line width=0.75pt}
+]
+
+\node[module] (user) {User command\\(natural language)};
+\node[module, right=of user] (spec) {A. Task Spec Builder\\goal/constraints/success};
+\node[module, right=of spec] (plan) {B. Task-to-Code Agent\\intent + plan + params};
+\node[module, right=of plan] (safe) {Safety Contract\\pre/invariant/tripwire};
+\node[module, right=of safe] (preview) {C. Sim-First Runner\\chat preview};
+\node[gate, right=of preview] (approve) {Approve\\\& Execute gate};
+\node[gate, right=of approve] (exec) {Live execution\\(sim/robot)};
+
+\node[support, below=1.25cm of preview, xshift=-1.15cm] (inspect) {D. Failure Inspector\\what/when/why};
+\node[support, right=of inspect] (patch) {E. Patch Suggestions\\2--3 bounded edits};
+\node[trace, below=0.95cm of patch, xshift=1.15cm] (audit) {Traceability logs\\command, approval, failure, patch, timing};
+
+\draw[arr] (user) -- (spec);
+\draw[arr] (spec) -- (plan);
+\draw[arr] (plan) -- (safe);
+\draw[arr] (safe) -- (preview);
+\draw[arr] (preview) -- (approve);
+\draw[arr] (approve) -- (exec);
+
+\draw[arr] (exec.south) |- (inspect.east);
+\draw[arr] (inspect) -- (patch);
+\draw[arr] (patch.north) |- (preview.south);
+\draw[arr] (safe.south) -- ++(0,-0.45) -| (inspect.north);
+\draw[arr] (approve.south) -- ++(0,-0.35) -| (audit.north);
+\draw[arr] (inspect.south) |- (audit.west);
+\draw[arr] (patch.south) -- (audit.north);
+
+\node[draw, rounded corners=3pt, fit=(user)(exec), inner sep=4pt, label={[font=\footnotesize]above:Primary pipeline}] {};
+\node[draw, rounded corners=3pt, fit=(inspect)(patch), inner sep=4pt, label={[font=\footnotesize]above:Repair loop}] {};
+
+\end{tikzpicture}
