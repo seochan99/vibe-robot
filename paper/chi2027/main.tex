@@ -151,9 +151,17 @@ To ground the architecture in observed interaction states, Figure~\ref{fig:ui-fl
 
 \begin{figure*}[t]
   \centering
-  \resizebox{\textwidth}{!}{\input{figures/ui_execution_flow_tikz}}
-  \caption{End-to-end UI execution flow reconstructed from representative prototype screenshots: landing/setup, command entry, pipeline + preview, approval gate, approved execution, and failure-aware retry.}
-  \Description{Six-panel runtime walkthrough showing state transitions and gating logic in the VibeRobot interface, including preview-only mode before approval and execution mode after approval.}
+  \setlength{\tabcolsep}{2pt}
+  \begin{tabular}{ccc}
+    \includegraphics[width=0.32\textwidth]{figures/0.onboarding-screen.png} &
+    \includegraphics[width=0.32\textwidth]{figures/1.chat-to-message-pick-up-the-apple.png} &
+    \includegraphics[width=0.32\textwidth]{figures/2.reasoning.png} \\
+    \includegraphics[width=0.32\textwidth]{figures/5.approve-and-work.png} &
+    \includegraphics[width=0.32\textwidth]{figures/3.simulator-1-pick-apple.png} &
+    \includegraphics[width=0.32\textwidth]{figures/4.simulator-1-pick-up-apple.png}
+  \end{tabular}
+  \caption{Observed runtime UI sequence in \textbf{VibeRobot!} (left-to-right, top-to-bottom): S0 onboarding/scene setup, S1 command entry, S2 reasoning + simulation preview, S3 explicit approval gate (\textit{Reject} vs \textit{Approve \& Execute}), S4 approved execution start, and S5 live execution status.}
+  \Description{Six real interface screenshots showing the end-to-end interaction from onboarding to approval-gated execution in the VibeRobot system.}
   \label{fig:ui-flow}
 \end{figure*}
 

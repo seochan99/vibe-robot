@@ -10,7 +10,7 @@ This folder contains an ACM `acmart`-based draft for the ArmCraft CHI 2027 submi
 - `claim_evidence_matrix.md` — claim-to-evidence traceability map (literature + artifact)
 - `figures/` — generated figures used in the paper
   - `framework_tikz.tex` (LaTeX-native full framework figure)
-  - `ui_execution_flow_tikz.tex` (LaTeX-native runtime UI walkthrough figure)
+  - `0.onboarding-screen.png` to `5.approve-and-work.png` (real UI screenshot sequence for runtime walkthrough)
   - `system_overview.png`
   - `interaction_loop.png`
   - `study_design.png`
