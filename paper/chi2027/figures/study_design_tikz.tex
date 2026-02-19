@@ -1,0 +1,57 @@
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  box/.style={
+    draw,
+    rounded corners=2pt,
+    align=center,
+    minimum height=0.95cm,
+    text width=2.5cm,
+    fill=blue!7
+  },
+  cond/.style={
+    draw,
+    rounded corners=2pt,
+    align=center,
+    minimum height=0.9cm,
+    text width=1.95cm,
+    fill=green!10
+  },
+  metric/.style={
+    draw,
+    rounded corners=2pt,
+    align=left,
+    minimum height=0.9cm,
+    text width=3.3cm,
+    fill=orange!12
+  },
+  qual/.style={
+    draw,
+    rounded corners=2pt,
+    align=left,
+    minimum height=0.9cm,
+    text width=3.2cm,
+    fill=red!10
+  },
+  arr/.style={-Latex, line width=0.75pt}
+]
+
+\node[box] (study1) at (0,0) {Study 1 (N=32--40)\\Controlled 2x2 ablation\\(sim-first + approval fixed)};
+\node[cond] (c0) at (3.2,0.6) {C0 Base\\Card Off\\Patch Off};
+\node[cond] (c1) at (5.4,0.6) {C1 +Card\\Card On\\Patch Off};
+\node[cond] (c2) at (7.6,0.6) {C2 +Patch\\Card Off\\Patch On};
+\node[cond] (c3) at (9.8,0.6) {C3 Full\\Card On\\Patch On};
+
+\node[metric] (metrics) at (0,-2.1) {\textbf{Primary:}\\time-to-first-success, collisions,\\constraint violations, transfer\\[1mm]\textbf{Signature:}\\recovery depth, patch yield,\\failure-transition profile};
+\node[metric] (attrib) at (4.3,-2.1) {\textbf{Attribution/Trust:}\\NASA-TLX, perceived control,\\retry-wise attribution calibration\\(self/robot/AI)};
+\node[qual] (study2) at (8.4,-2.1) {\textbf{Study 2 (Think-aloud + interview):}\\failure interpretation, patch uptake,\\confidence recovery, and control narratives};
+
+\draw[arr] (study1.east) -- (c0.west);
+\draw[arr] (c0.east) -- (c1.west);
+\draw[arr] (c1.east) -- (c2.west);
+\draw[arr] (c2.east) -- (c3.west);
+\draw[arr] (study1.south) -- (metrics.north);
+\draw[arr] (c1.south) -- (attrib.north);
+\draw[arr] (c3.south) -- (study2.north);
+
+\end{tikzpicture}

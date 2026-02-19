@@ -1,42 +1,80 @@
 \begin{tikzpicture}[
   x=1cm,
   y=1cm,
-  node distance=0.55cm and 0.55cm,
-  module/.style={draw, rounded corners=2pt, align=center, minimum height=1.0cm, text width=2.2cm, fill=blue!7},
-  support/.style={draw, rounded corners=2pt, align=center, minimum height=0.95cm, text width=2.5cm, fill=orange!12},
-  gate/.style={draw, rounded corners=2pt, align=center, minimum height=1.0cm, text width=2.2cm, fill=green!14},
-  trace/.style={draw, rounded corners=2pt, align=center, minimum height=0.85cm, text width=2.5cm, fill=gray!12},
-  arr/.style={-Latex, line width=0.75pt}
+  stage/.style={
+    draw,
+    rounded corners=2pt,
+    align=center,
+    minimum height=1.05cm,
+    text width=2.65cm,
+    fill=blue!7
+  },
+  safety/.style={
+    draw,
+    rounded corners=2pt,
+    align=center,
+    minimum height=0.9cm,
+    text width=2.8cm,
+    fill=blue!12
+  },
+  gate/.style={
+    draw,
+    rounded corners=2pt,
+    align=center,
+    minimum height=1.05cm,
+    text width=2.65cm,
+    fill=green!14
+  },
+  repair/.style={
+    draw,
+    rounded corners=2pt,
+    align=center,
+    minimum height=0.95cm,
+    text width=2.95cm,
+    fill=orange!12
+  },
+  trace/.style={
+    draw,
+    rounded corners=2pt,
+    align=center,
+    minimum height=0.9cm,
+    text width=2.75cm,
+    fill=gray!12
+  },
+  arr/.style={-Latex, line width=0.8pt}
 ]
 
-\node[module] (user) {User command\\(natural language)};
-\node[module, right=of user] (spec) {A. Task Spec Builder\\goal/constraints/success};
-\node[module, right=of spec] (plan) {B. Task-to-Code Agent\\intent + plan + params};
-\node[module, right=of plan] (safe) {Safety Contract\\pre/invariant/tripwire};
-\node[module, right=of safe] (preview) {C. Sim-First Runner\\chat preview};
-\node[gate, right=of preview] (approve) {Approve\\\& Execute gate};
-\node[gate, right=of approve] (exec) {Live execution\\(sim/robot)};
+\node[stage] (user) at (0,0) {User command\\(natural language)};
+\node[stage] (spec) at (3.2,0) {A. Task Spec Builder\\goal/constraints/success};
+\node[stage] (plan) at (6.4,0) {B. Task-to-Code Agent\\intent + plan + params};
+\node[stage] (preview) at (9.6,0) {C. Sim-First Runner\\chat preview};
+\node[gate]  (approve) at (12.8,0) {Approve\\\& Execute gate};
+\node[gate]  (exec) at (16.0,0) {Live execution\\(sim/robot)};
+\node[safety] (safe) at (8.0,-1.45) {Safety Contract\\preconditions + invariants + tripwires};
 
-\node[support, below=1.25cm of preview, xshift=-1.15cm] (inspect) {D. Failure Inspector\\what/when/why};
-\node[support, right=of inspect] (patch) {E. Patch Suggestions\\2--3 bounded edits};
-\node[trace, below=0.95cm of patch, xshift=1.15cm] (audit) {Traceability logs\\command, approval, failure, patch, timing};
+\node[repair] (inspect) at (10.2,-3.1) {D. Failure Inspector\\what/when/why};
+\node[repair] (patch) at (13.8,-3.1) {E. Patch Suggestions\\2--3 bounded edits};
+\node[trace]  (audit) at (16.0,-4.75) {Traceability logs\\command, approval, failure, patch, timing};
 
 \draw[arr] (user) -- (spec);
 \draw[arr] (spec) -- (plan);
-\draw[arr] (plan) -- (safe);
-\draw[arr] (safe) -- (preview);
+\draw[arr] (plan) -- (preview);
 \draw[arr] (preview) -- (approve);
 \draw[arr] (approve) -- (exec);
 
-\draw[arr] (exec.south) |- (inspect.east);
+\draw[arr] (plan.south) -- (safe.north);
+\draw[arr] (safe.north east) to[out=35,in=-120] (preview.south west);
+\draw[arr] (safe.south) -- (inspect.north);
+\draw[arr] (exec.south) -- ++(0,-1.15) -| (inspect.east);
 \draw[arr] (inspect) -- (patch);
-\draw[arr] (patch.north) |- (preview.south);
-\draw[arr] (safe.south) -- ++(0,-0.45) -| (inspect.north);
-\draw[arr] (approve.south) -- ++(0,-0.35) -| (audit.north);
-\draw[arr] (inspect.south) |- (audit.west);
-\draw[arr] (patch.south) -- (audit.north);
+\draw[arr] (patch.north) to[out=90,in=-50] (preview.south);
 
-\node[draw, rounded corners=3pt, fit=(user)(exec), inner sep=4pt, label={[font=\footnotesize]above:Primary pipeline}] {};
-\node[draw, rounded corners=3pt, fit=(inspect)(patch), inner sep=4pt, label={[font=\footnotesize]above:Repair loop}] {};
+\draw[arr] (inspect.south) -- ++(0,-0.85) -| (audit.west);
+\draw[arr] (patch.south) -- ++(0,-0.65) -| (audit.north);
+\draw[arr] (approve.south) -- ++(0,-0.65) |- (audit.north);
+\draw[arr] (exec.south) -- ++(0,-0.5) -- (audit.north);
+
+\node[draw, rounded corners=3pt, fit=(user)(exec), inner sep=5pt, label={[font=\footnotesize]above:Primary pipeline}] {};
+\node[draw, rounded corners=3pt, fit=(safe)(inspect)(patch), inner sep=5pt, label={[font=\footnotesize]above:Repair loop + safety feedback}] {};
 
 \end{tikzpicture}

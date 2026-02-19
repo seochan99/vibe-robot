@@ -8,7 +8,7 @@
 \usetikzlibrary{arrows.meta,positioning,fit}
 
 \setcopyright{none}
-\acmConference[CHI '27]{Proceedings of the 2027 CHI Conference on Human Factors in Computing Systems}{April 2027}{Yokohama, Japan}
+\acmConference[CHI '27]{Proceedings of the 2027 CHI Conference on Human Factors in Computing Systems}{May 10--14, 2027}{Pittsburgh, PA, USA}
 \acmBooktitle{CHI '27: Proceedings of the 2027 CHI Conference on Human Factors in Computing Systems}
 \acmDOI{TBD}
 \acmISBN{TBD}
@@ -98,6 +98,7 @@ The literature strongly covers language-to-robot generation and general explaina
 
 \section{ArmCraft: Vibe-to-Verify Architecture}
 Figure~\ref{fig:system-overview} shows the full architecture as implemented in our prototype and extended for CHI evaluation.
+In this paper, \textbf{VibeRobot!} denotes the end-to-end interactive system, while \textbf{ArmCraft} denotes the interaction architecture inside that system.
 
 \begin{figure*}[t]
   \centering
@@ -134,6 +135,22 @@ These requirements are aligned with prior human-AI interaction guidance on user 
   \Description{Diagram of failure card anatomy with three card sections and three example patch suggestions.}
   \label{fig:failure-inspector}
 \end{figure}
+
+\begin{table}[t]
+  \caption{Failure taxonomy and default patch families in ArmCraft.}
+  \label{tab:failure-taxonomy}
+  \begin{tabular}{p{2.2cm}p{4.6cm}}
+    \toprule
+    Failure type & Default patch family \\
+    \midrule
+    Collision & waypoint offset, path replan, speed cap \\
+    Grasp fail & top-down regrasp, gripper width/force tuning \\
+    Unreachable/IK & target retreat, pose relaxation, alternate approach angle \\
+    Workspace violation & bounds clamp, intermediate waypoint insertion \\
+    Perception lost & target-lock refresh, re-detect wait, conservative fallback \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 \subsection{Loop-Level Interaction}
 Figure~\ref{fig:interaction-loop} summarizes the user loop.
@@ -204,37 +221,54 @@ Figure~\ref{fig:study-design} outlines the two-study program.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{figures/study_design.png}
-  \caption{Planned CHI evaluation: controlled experiment (Study 1) plus qualitative deep dive (Study 2).}
-  \Description{Diagram of three-condition experiment and think-aloud interview follow-up.}
+  \resizebox{\columnwidth}{!}{\input{figures/study_design_tikz}}
+  \caption{Planned CHI evaluation: Study 1 uses a 2x2 component ablation under fixed sim-first approval; Study 2 performs think-aloud and interview-based mechanism tracing.}
+  \Description{Diagram of Study 1 with four conditions from failure-card and patch factors, and Study 2 qualitative follow-up.}
   \label{fig:study-design}
 \end{figure}
 
-\subsection{Study 1: Controlled Experiment (N=24--36)}
+\subsection{Study 1: Controlled Experiment (N=32--40)}
+\textbf{Design.}
+We use a 2x2 component ablation with \emph{sim-first preview + explicit approval} fixed in every condition.
+\begin{itemize}
+  \item \textbf{Factor F1}: Failure Inspector card (\textit{Off}/\textit{On})
+  \item \textbf{Factor F2}: Patch Suggestions (\textit{Off}/\textit{On})
+\end{itemize}
+
 \textbf{Conditions.}
 \begin{itemize}
-  \item \textbf{Vibe-only}: natural language plan generation + direct simulation execution.
-  \item \textbf{Sim-first only}: forced preview/approval but raw logs (no Failure Inspector/Patches).
-  \item \textbf{ArmCraft}: full loop with inspector and patch suggestions.
+  \item \textbf{C0 (Base)}: sim-first + approval, no failure card, no patches.
+  \item \textbf{C1 (+Card)}: C0 + failure card only.
+  \item \textbf{C2 (+Patch)}: C0 + patch suggestions only.
+  \item \textbf{C3 (ArmCraft Full)}: failure card + patch suggestions.
 \end{itemize}
 
 \textbf{Tasks.}
-Pick-and-place, sorting, and reach-avoid tasks under standardized scenes and perturbation trials.
+We use tasks that directly probe known HCI bottlenecks in robot vibe coding:
+\begin{itemize}
+  \item \textbf{T1: Manipulation baseline} (pick-and-place, sorting, reach-avoid) with perturbation trials.
+  \item \textbf{T2: Deictic correction chain} (e.g., ``not that one, the next one'') to stress context carry-over.
+  \item \textbf{T3: Mid-task requirement change} (e.g., new exclusion constraints after first attempt).
+  \item \textbf{T4: Preview-boundary judgment} where users must decide reject/approve from previewed risk.
+\end{itemize}
 
 \begin{table}[t]
-  \caption{Condition features in Study 1.}
+  \caption{Condition features in Study 1 (2x2 ablation).}
   \label{tab:conditions}
-  \begin{tabular}{lccc}
+  \centering
+  \scriptsize
+  \begin{tabular}{p{2.35cm}cccc}
     \toprule
-    Feature & Vibe-only & Sim-first & ArmCraft \\
+    Feature & C0 Base & C1 +Card & C2 +Patch & C3 Full \\
     \midrule
-    Sim preview before execute & No & Yes & Yes \\
-    Explicit approval gate & No & Yes & Yes \\
-    Failure card diagnosis & No & No & Yes \\
-    Patch suggestions (2--3) & No & No & Yes \\
-    Retry context lock & No & No & Yes \\
+    Sim preview before execute & Yes & Yes & Yes & Yes \\
+    Explicit approval gate & Yes & Yes & Yes & Yes \\
+    Failure card diagnosis & No & Yes & No & Yes \\
+    Patch suggestions (2--3) & No & No & Yes & Yes \\
+    Retry context lock & No & Yes & Yes & Yes \\
     \bottomrule
   \end{tabular}
+  \normalsize
 \end{table}
 
 \subsection{Measures}
@@ -242,10 +276,18 @@ Pick-and-place, sorting, and reach-avoid tasks under standardized scenes and per
 
 \textbf{Secondary outcomes}: NASA-TLX workload~\cite{hart1988nasa}, trust and perceived control scales~\cite{lee2004trust,hancock2011meta}, and post-failure attribution choices (self/robot/AI/planner+justification).
 
+\textbf{Recovery trajectory metrics (signature)}:
+\begin{itemize}
+  \item \textbf{Recovery depth}: number of repair turns from first failure to first success.
+  \item \textbf{Patch yield}: fraction of applied patches that reduce failure severity or produce success in the next run.
+  \item \textbf{Failure-transition profile}: transition matrix over the five failure types in Table~\ref{tab:failure-taxonomy}.
+  \item \textbf{Attribution calibration curve}: retry-wise 100-point allocation over self/robot/AI and its convergence pattern.
+\end{itemize}
+
 \textbf{Process traces}: event logs, stage durations, rejected vs. accepted patches, and post-patch delta in failure type.
 
 \subsection{Analysis Plan}
-For Study 1, we will use mixed-effects models with condition as fixed effect and participant/task as random effects, following established guidance for confirmatory modeling of repeated-measures data~\cite{barr2013maximal}. For non-normal outcomes, we will use generalized mixed models. Planned post-hoc contrasts are ArmCraft vs each baseline with multiplicity control. We will report effect sizes and confidence intervals, not only p-values~\cite{lakens2013effectsizes}.
+For Study 1, we will fit mixed-effects models with \textbf{F1}, \textbf{F2}, and their interaction as fixed effects and participant/task as random effects, following established guidance for confirmatory repeated-measures analysis~\cite{barr2013maximal}. For non-normal outcomes, we will use generalized mixed models. We will report effect sizes and confidence intervals, not only p-values~\cite{lakens2013effectsizes}. Planned contrasts test (a) card-only gain, (b) patch-only gain, and (c) super-additive gain in the full loop.
 
 \subsection{Study 2: Think-Aloud + Semi-Structured Interviews}
 Study 2 examines \emph{how} users interpret failures and choose patches. We will code:
@@ -273,9 +315,23 @@ In our submission package, this is operationalized as a claim-evidence matrix th
 
 \subsection{Operational Safety}
 All executions are approval-gated and constrained by explicit safety contracts (workspace, speed limits, collision tripwires, emergency stops). Study protocols include stop controls and non-deceptive consent disclosures.
+\begin{verbatim}
+max_speed_mps: 0.5
+workspace_bounds:
+  x: [xmin, xmax]
+  y: [ymin, ymax]
+  z: [zmin, zmax]
+tripwires:
+  - unexpected_collision
+  - dropped_object
+  - joint_torque_exceeded
+halt_conditions:
+  - target_out_of_workspace
+  - unreachable_pose
+\end{verbatim}
 
 \subsection{External Validity Limits}
-Our current evidence target is simulation-grounded interaction quality. Real hardware transfer remains a follow-up stage and may introduce perception/calibration failures beyond the current simulator envelope.
+Our primary evidence target is interaction quality under controlled failure-repair cycles, not hardware benchmarking. We intentionally use simulation because it supports repeatable failure injection, condition-controlled comparison, and auditable replay of recovery trajectories. Real hardware transfer remains a follow-up stage and may introduce perception/calibration failures beyond the current simulator envelope; we therefore report hardware generalization as future validation rather than conflating it with interaction-mechanism evidence.
 
 \section{Discussion}
 ArmCraft argues that robot vibe coding should be evaluated as an \emph{interactive debugging system}, not only as a planner. This reframes the unit of success from ``one generated plan'' to ``human+AI recovery trajectory under uncertainty.'' If confirmed empirically, this has design implications for future robot authoring tools:

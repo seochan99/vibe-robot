@@ -1,4 +1,4 @@
-# ArmCraft CHI2027 Claim-Evidence Matrix (v2)
+# ArmCraft CHI2027 Claim-Evidence Matrix (v3)
 
 Date: 2026-02-19  
 Scope: Map major claims in `/Users/chan/viberobot/paper/chi2027/main.tex` to verifiable evidence.
@@ -37,6 +37,7 @@ Scope: Map major claims in `/Users/chan/viberobot/paper/chi2027/main.tex` to ver
 | S11 | Framework figure is LaTeX-native (not raster-only), enabling source-level auditability | TeX artifact | `/Users/chan/viberobot/paper/chi2027/figures/framework_tikz.tex:1` |
 | S12 | Interaction loop (command -> plan/preview -> approval -> execute -> repair loop) is explicitly documented as a stateful flow | Figure artifact + manuscript mapping | `/Users/chan/viberobot/paper/chi2027/figures/interaction_loop.png`, `/Users/chan/viberobot/paper/chi2027/main.tex:138` |
 | S13 | Runtime walkthrough is additionally grounded with real product screenshots for each phase | Screenshot artifacts + manuscript mapping | `/Users/chan/viberobot/paper/chi2027/figures/0.onboarding-screen.png`, `/Users/chan/viberobot/paper/chi2027/figures/1.chat-to-message-pick-up-the-apple.png`, `/Users/chan/viberobot/paper/chi2027/figures/2.reasoning.png`, `/Users/chan/viberobot/paper/chi2027/figures/3.simulator-1-pick-apple.png`, `/Users/chan/viberobot/paper/chi2027/figures/4.simulator-1-pick-up-apple.png`, `/Users/chan/viberobot/paper/chi2027/figures/5.approve-and-work.png`, `/Users/chan/viberobot/paper/chi2027/main.tex:152` |
+| S14 | Study design figure explicitly encodes the 2x2 component ablation (card on/off x patch on/off) | TeX artifact + manuscript mapping | `/Users/chan/viberobot/paper/chi2027/figures/study_design_tikz.tex:1`, `/Users/chan/viberobot/paper/chi2027/main.tex:223` |
 
 ## C. Local Regression Execution Record
 
