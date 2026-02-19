@@ -710,7 +710,8 @@ class VibeRobotPipeline:
                 self.env.reset()
 
                 # Enable frame capture for animated preview
-                self.env.enable_frame_capture(every_n=8, width=480, height=360)
+                # Keep preview lightweight so chat response remains responsive.
+                self.env.enable_frame_capture(every_n=14, width=320, height=240)
 
                 # Execute plan steps in simulation
                 for step in plan.steps:
@@ -755,9 +756,13 @@ class VibeRobotPipeline:
         contract: SafetyContract,
     ) -> list[dict]:
         """Execute the plan for real (after approval)."""
-        # Keep world/object state continuous across turns; only home the arm.
-        self.controller.open_gripper(duration=0.25)
-        self.controller.home()
+        # Keep world/object state continuous across turns.
+        # Open gripper to clear stale grasps and home only when far from home.
+        self.controller.open_gripper(duration=0.18)
+        current_q = self.controller.get_joint_positions()
+        home_q = self.env.HOME_QPOS[:7]
+        if np.linalg.norm(current_q - home_q) > 0.25:
+            self.controller.home(duration=0.9)
         monitor = SafetyMonitor(contract)
         results = []
 

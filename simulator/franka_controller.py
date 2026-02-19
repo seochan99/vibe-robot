@@ -120,7 +120,7 @@ class FrankaController:
         Uses smooth (cosine) interpolation for natural-looking motion.
         """
         current_q = self.get_joint_positions()
-        n_steps = int(duration / self.env._control_dt)
+        n_steps = max(1, int(duration / self.env._control_dt))
 
         gripper_ctrl = self.GRIPPER_OPEN if self._gripper_state == GripperState.OPEN else self.GRIPPER_CLOSED
 
@@ -158,7 +158,7 @@ class FrankaController:
         self,
         target_pos: np.ndarray,
         target_quat: Optional[np.ndarray] = None,
-        duration: float = 2.0,
+        duration: float = 1.2,
         record: bool = True,
     ) -> MotionResult:
         """Move end-effector to a Cartesian target pose.
@@ -185,7 +185,7 @@ class FrankaController:
 
         return self.move_to_joint(target_q, duration=duration, record=record)
 
-    def open_gripper(self, duration: float = 0.5) -> MotionResult:
+    def open_gripper(self, duration: float = 0.3) -> MotionResult:
         """Open the gripper fingers."""
         self._gripper_state = GripperState.OPEN
         self._attached_object = None
@@ -195,7 +195,7 @@ class FrankaController:
         ctrl[7:] = self.GRIPPER_OPEN
 
         wall_start = time.monotonic()
-        n_steps = int(duration / self.env._control_dt)
+        n_steps = max(1, int(duration / self.env._control_dt))
         for i in range(n_steps):
             self.env.step_control(ctrl)
             if self.realtime:
@@ -205,7 +205,7 @@ class FrankaController:
                     time.sleep(sleep_time)
         return MotionResult(success=True, message="Gripper opened")
 
-    def close_gripper(self, duration: float = 0.5) -> MotionResult:
+    def close_gripper(self, duration: float = 0.3) -> MotionResult:
         """Close the gripper fingers."""
         self._gripper_state = GripperState.CLOSED
         current_q = self.get_joint_positions()
@@ -214,7 +214,7 @@ class FrankaController:
         ctrl[7:] = self.GRIPPER_CLOSED
 
         wall_start = time.monotonic()
-        n_steps = int(duration / self.env._control_dt)
+        n_steps = max(1, int(duration / self.env._control_dt))
         for i in range(n_steps):
             self.env.step_control(ctrl)
             if self.realtime:
@@ -237,7 +237,7 @@ class FrankaController:
             return MotionResult(success=False, message=f"Object '{object_name}' not found")
 
         # 1. Ensure open gripper before approach to avoid pushing/tipping objects.
-        self.open_gripper()
+        self.open_gripper(duration=0.2)
 
         # 2. Retry grasp with slight lateral offsets to recover from unstable contacts.
         grasp_offsets = [
@@ -258,7 +258,7 @@ class FrankaController:
             approach_pos = candidate.copy()
             approach_pos[2] += approach_h
             total_cartesian_moves += 1
-            result = self.move_to(approach_pos, duration=0.9 if attempt_i > 0 else 1.0)
+            result = self.move_to(approach_pos, duration=0.55 if attempt_i > 0 else 0.65)
             if not result.success:
                 last_move_error = result.message
                 if "IK failed" in result.message:
@@ -268,20 +268,20 @@ class FrankaController:
             grasp_pos = candidate.copy()
             grasp_pos[2] += 0.012
             total_cartesian_moves += 1
-            result = self.move_to(grasp_pos, duration=1.1)
+            result = self.move_to(grasp_pos, duration=0.75)
             if not result.success:
                 last_move_error = result.message
                 if "IK failed" in result.message:
                     total_ik_failures += 1
                 continue
 
-            self.close_gripper(duration=0.7)
+            self.close_gripper(duration=0.35)
             if self._try_kinematic_attach(object_name, snap_scale=1.0 if attempt_i == 0 else 1.25):
                 attached = True
                 break
 
             # Re-open before trying a new approach.
-            self.open_gripper(duration=0.35)
+            self.open_gripper(duration=0.2)
 
         if not attached:
             if total_cartesian_moves > 0 and total_ik_failures == total_cartesian_moves:
@@ -304,7 +304,7 @@ class FrankaController:
         ee_pos = self.get_ee_pos()
         mid_lift = ee_pos.copy()
         mid_lift[2] += max(0.04, approach_h * 0.55)
-        result = self.move_to(mid_lift, duration=0.9)
+        result = self.move_to(mid_lift, duration=0.55)
         if not result.success:
             self._attached_object = None
             return MotionResult(
@@ -314,7 +314,7 @@ class FrankaController:
 
         final_lift = mid_lift.copy()
         final_lift[2] += max(0.03, approach_h * 0.45)
-        result = self.move_to(final_lift, duration=1.0)
+        result = self.move_to(final_lift, duration=0.6)
         if not result.success:
             self._attached_object = None
             return MotionResult(
@@ -382,25 +382,25 @@ class FrankaController:
         # 1. Move above target
         above_pos = target_pos.copy()
         above_pos[2] += approach_h
-        result = self.move_to(above_pos)
+        result = self.move_to(above_pos, duration=0.8)
         if not result.success:
             return result
 
         # 2. Descend to place height
         place_pos = target_pos.copy()
         place_pos[2] += 0.01
-        result = self.move_to(place_pos, duration=1.0)
+        result = self.move_to(place_pos, duration=0.7)
         if not result.success:
             return result
 
         # 3. Open gripper (releases object)
-        self.open_gripper()
+        self.open_gripper(duration=0.2)
         self._attached_object = None
 
         # 4. Retreat upward
         retreat_pos = place_pos.copy()
         retreat_pos[2] += approach_h
-        result = self.move_to(retreat_pos, duration=1.0)
+        result = self.move_to(retreat_pos, duration=0.7)
         if not result.success:
             return MotionResult(
                 success=False,
@@ -412,9 +412,9 @@ class FrankaController:
             message=f"Placed '{object_name}' at {target_pos.tolist()}",
         )
 
-    def home(self) -> MotionResult:
+    def home(self, duration: float = 1.2) -> MotionResult:
         """Return to home configuration."""
-        return self.move_to_joint(self.env.HOME_QPOS[:7], duration=2.0)
+        return self.move_to_joint(self.env.HOME_QPOS[:7], duration=duration)
 
     def _update_attachment(self) -> None:
         """Move attached object to follow end-effector (kinematic snap)."""

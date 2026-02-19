@@ -403,6 +403,16 @@ async def run_command_stream(req: CommandRequest):
                         "note": issue or result.error or (result.plan.plan_description if result.plan else ""),
                     }
                 )
+                yield (
+                    "event: stage\ndata: "
+                    + _json.dumps(
+                        {
+                            "stage": "finalizing",
+                            "message": "Preparing preview output...",
+                        }
+                    )
+                    + "\n\n"
+                )
                 serialized = _serialize_result(result)
                 logger.info(
                     "/api/command/stream done stage=%s error=%s",
@@ -870,13 +880,30 @@ async def sim_stream():
     """MJPEG streaming endpoint — renders MuJoCo at ~10fps."""
 
     async def generate():
+        frozen_stages = {
+            PipelineStage.INTENT_INFERENCE,
+            PipelineStage.SCENE_UNDERSTANDING,
+            PipelineStage.AFFORDANCE_ANALYSIS,
+            PipelineStage.PLAN_GENERATION,
+            PipelineStage.SAFETY_CONTRACT,
+            PipelineStage.SIMULATION_PREVIEW,
+            PipelineStage.AWAITING_APPROVAL,
+        }
         while True:
             if state.pipeline and state.pipeline.env:
                 try:
+                    if state.pipeline.current_stage in frozen_stages:
+                        # Keep right panel visually frozen until explicit approval.
+                        await asyncio.sleep(0.2)
+                        continue
+                    is_executing = (
+                        state.pipeline.current_stage == PipelineStage.EXECUTING
+                    )
+                    width, height = (560, 420) if is_executing else (640, 480)
                     frame = await asyncio.to_thread(
                         state.pipeline.env.render_offscreen,
-                        640,
-                        480,
+                        width,
+                        height,
                     )
                     from PIL import Image
 
@@ -899,7 +926,8 @@ async def sim_stream():
                 await asyncio.sleep(0.5)
                 continue
 
-            await asyncio.sleep(0.05)  # ~20fps for smoother interactive camera control
+            # During live execution prioritize control-thread progress over render FPS.
+            await asyncio.sleep(0.12 if is_executing else 0.05)
 
     return StreamingResponse(
         generate(),
@@ -976,6 +1004,11 @@ def _serialize_result(result: PipelineResult) -> dict:
 
             valid = [f for f in result.preview_frames if isinstance(f, np.ndarray)]
             if len(valid) > 1:
+                # Sample frames to keep GIF encoding responsive.
+                max_frames = 8
+                if len(valid) > max_frames:
+                    stride = max(1, (len(valid) + max_frames - 1) // max_frames)
+                    valid = valid[::stride]
                 # Animated GIF
                 images = [Image.fromarray(f) for f in valid]
                 buf = io.BytesIO()
@@ -984,7 +1017,7 @@ def _serialize_result(result: PipelineResult) -> dict:
                     format="GIF",
                     save_all=True,
                     append_images=images[1:],
-                    duration=80,  # 80ms per frame ≈ 12.5fps
+                    duration=90,  # lightweight preview animation
                     loop=0,
                 )
                 out["preview_image"] = base64.b64encode(buf.getvalue()).decode()
