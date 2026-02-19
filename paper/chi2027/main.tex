@@ -147,22 +147,32 @@ Figure~\ref{fig:interaction-loop} summarizes the user loop.
 \end{figure}
 
 \subsection{Runtime UI Walkthrough}
-To ground the architecture in observed interaction states, Figure~\ref{fig:ui-flow} captures the full runtime sequence from landing to execution and retry. The walkthrough highlights three properties that were repeatedly requested during QA: (1) no actuation before explicit approval, (2) visible separation between chat preview and right-panel execution, and (3) bounded failure-repair iterations that preserve conversational context.
+To ground the architecture in observed interaction states, Figures~\ref{fig:ui-flow-a} and~\ref{fig:ui-flow-b} capture the runtime sequence from landing to approval-gated execution. The walkthrough highlights three properties that were repeatedly requested during QA: (1) no actuation before explicit approval, (2) visible separation between chat preview and right-panel execution, and (3) bounded failure-repair iterations that preserve conversational context.
 
 \begin{figure*}[t]
   \centering
-  \setlength{\tabcolsep}{2pt}
-  \begin{tabular}{ccc}
-    \includegraphics[width=0.32\textwidth]{figures/0.onboarding-screen.png} &
-    \includegraphics[width=0.32\textwidth]{figures/1.chat-to-message-pick-up-the-apple.png} &
-    \includegraphics[width=0.32\textwidth]{figures/2.reasoning.png} \\
-    \includegraphics[width=0.32\textwidth]{figures/5.approve-and-work.png} &
-    \includegraphics[width=0.32\textwidth]{figures/3.simulator-1-pick-apple.png} &
-    \includegraphics[width=0.32\textwidth]{figures/4.simulator-1-pick-up-apple.png}
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{cc}
+    \includegraphics[width=0.49\textwidth]{figures/0.onboarding-screen.png} &
+    \includegraphics[width=0.49\textwidth]{figures/1.chat-to-message-pick-up-the-apple.png} \\
+    \includegraphics[width=0.49\textwidth]{figures/2.reasoning.png} &
+    \includegraphics[width=0.49\textwidth]{figures/5.approve-and-work.png}
   \end{tabular}
-  \caption{Observed runtime UI sequence in \textbf{VibeRobot!} (left-to-right, top-to-bottom): S0 onboarding/scene setup, S1 command entry, S2 reasoning + simulation preview, S3 explicit approval gate (\textit{Reject} vs \textit{Approve \& Execute}), S4 approved execution start, and S5 live execution status.}
-  \Description{Six real interface screenshots showing the end-to-end interaction from onboarding to approval-gated execution in the VibeRobot system.}
-  \label{fig:ui-flow}
+  \caption{Runtime walkthrough (Part I, left-to-right/top-to-bottom): S0 onboarding and scene setup, S1 command entry, S2 reasoning + simulation preview, and S3 explicit approval gate (\textit{Reject} vs \textit{Approve \& Execute}).}
+  \Description{Four enlarged interface screenshots showing setup, command entry, preview generation, and approval gating in the VibeRobot runtime flow.}
+  \label{fig:ui-flow-a}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{cc}
+    \includegraphics[width=0.49\textwidth]{figures/3.simulator-1-pick-apple.png} &
+    \includegraphics[width=0.49\textwidth]{figures/4.simulator-1-pick-up-apple.png}
+  \end{tabular}
+  \caption{Runtime walkthrough (Part II): S4 approved execution start and S5 live execution status in the simulator panel.}
+  \Description{Two enlarged interface screenshots showing post-approval execution in the VibeRobot simulator panel.}
+  \label{fig:ui-flow-b}
 \end{figure*}
 
 \subsection{Pipeline Hardening from QA}
