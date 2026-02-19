@@ -967,6 +967,7 @@ export default function AppPage() {
                       <div className="max-w-[90%] rounded-2xl rounded-bl-md bg-[var(--surface)] border border-[var(--border)] text-sm leading-relaxed overflow-hidden">
                         {/* Preview image — front and center */}
                         {msg.previewImage && (
+                          /* eslint-disable-next-line @next/next/no-img-element */
                           <img
                             src={`data:image/${msg.previewFormat === "gif" ? "gif" : "png"};base64,${msg.previewImage}`}
                             alt="Simulation preview"

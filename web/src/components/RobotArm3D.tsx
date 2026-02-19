@@ -193,10 +193,12 @@ function GridFloor() {
 /* ── Camera rig ───────────────────────────────────────────────────────────── */
 
 function CameraRig() {
-  const { camera, size } = useThree();
-  useFrame(() => {
+  const { size } = useThree();
+  useFrame((state) => {
     const targetZ = size.width / size.height < 1 ? 6 : 4.5;
-    camera.position.z += (targetZ - camera.position.z) * 0.05;
+    const cam = state.camera;
+    const nextZ = cam.position.z + (targetZ - cam.position.z) * 0.05;
+    cam.position.set(cam.position.x, cam.position.y, nextZ);
   });
   return null;
 }

@@ -177,7 +177,7 @@ export function parseCallbackUrl(
 export async function exchangeCode(code: string): Promise<OAuthTokens> {
   const pkceRaw = localStorage.getItem(PKCE_KEY);
   if (!pkceRaw) throw new Error("Auth session expired. Please try again.");
-  const { verifier, state: savedState } = JSON.parse(pkceRaw);
+  const { verifier } = JSON.parse(pkceRaw);
 
   const resp = await fetch(TOKEN_URL, {
     method: "POST",

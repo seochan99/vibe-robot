@@ -88,6 +88,7 @@ export function SimulationPanel({
       <div className="relative flex-1 min-h-0 bg-black flex items-center justify-center">
         {simConnected ? (
           <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               ref={simImgRef}
               src={simStreamUrl}
